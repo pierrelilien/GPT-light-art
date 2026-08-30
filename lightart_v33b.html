@@ -1,0 +1,304 @@
+<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0d1015;color:#fff;font:14px -apple-system,Arial;padding-bottom:190px}
+main{padding:10px;max-width:850px;margin:auto}header{display:flex;justify-content:space-between;align-items:center}h1{font-size:22px;margin:0}
+button{background:#242b36;color:#fff;border:1px solid #465064;border-radius:10px;padding:9px 12px;font-weight:700}
+#st{display:block;color:#cbd5e1;margin:8px 0}
+canvas{width:100%;height:62vh;min-height:455px;background:#11151b;border:1px solid #303743;border-radius:14px;touch-action:none}
+.hide{display:none}.dock{position:fixed;left:8px;right:8px;bottom:max(8px,env(safe-area-inset-bottom));max-width:834px;margin:auto;background:#151a22f7;border:1px solid #354050;border-radius:16px;padding:10px;z-index:9}
+.dock label{display:grid;grid-template-columns:70px 1fr 55px;gap:8px;align-items:center;margin:7px 0}.dock b{text-align:right;font-size:12px}input{width:100%}
+</style>
+<main id="app">
+<header><h1>Light Art V3.3B</h1><button id="sw">Vue 2D</button></header>
+<small id="st"></small>
+<canvas id="c"></canvas><canvas id="m" class="hide"></canvas>
+<div class="dock">
+<label>X<input id="x" type="range" min="-30" max="50" value="28"><b id="xv"></b></label>
+<label>Y<input id="y" type="range" min="-30" max="50" value="-12"><b id="yv"></b></label>
+<label>Z<input id="z" type="range" min="5" max="70" value="32"><b id="zv"></b></label>
+<label>Faisceau<input id="f" type="range" min="5" max="55" value="28"><b id="fv"></b></label>
+</div></main>
+<script>
+'use strict';
+
+const CONFIG = Object.freeze({
+  canvas: { width:20, height:20, gridStep:2 },
+  sampling: { perAxis:13, reflectedRayStride:9 },
+  camera: { target:{x:10,y:10,z:1.5}, distance:48, zoom:1.16, yaw:-0.75, pitch:0.72, pitchMin:0.15, pitchMax:1.45, dragSensitivity:0.008 },
+  source: { x:28, y:-12, z:32, beamDeg:28, aim:{x:10,y:10,z:0}, coneSegments:12, fallbackConeLength:70 },
+  material: { nOutside:1.0003, nSlab:1.49, thicknessCm:0.20, film:{n:1.75,thicknessNm:165} },
+  pieces: [
+    {id:'p1',x:6.5,y:13.5,size:4,angleDeg:25,color:'#ff8cab'},
+    {id:'p2',x:12,y:10.5,size:3,angleDeg:105,color:'#7ddcff'},
+    {id:'p3',x:10.5,y:5.5,size:2.5,angleDeg:-20,color:'#ffd166'}
+  ],
+  palette: {
+    boardFill:'#24405a66', boardStroke:'#bfe1ff', grid:'#ffffff18',
+    pieceFill:'#d5f0ff22', pieceStroke:'#e6f7ff', background:'#11151b',
+    beamAxis:'#ffe392', coneFill:'rgba(255,220,105,.055)', coneLine:'rgba(255,227,146,.22)', coneRing:'rgba(255,227,146,.35)', transmit:'#eefaff'
+  }
+});
+
+const STATE = {
+  view:'3d',
+  camera:{ yaw:CONFIG.camera.yaw, pitch:CONFIG.camera.pitch },
+  source:{ x:CONFIG.source.x, y:CONFIG.source.y, z:CONFIG.source.z, beamDeg:CONFIG.source.beamDeg },
+  pointer:{ dragging:false, x:0, y:0 }
+};
+
+const DOM = {
+  app:document.querySelector('#app'), status:document.querySelector('#st'), switchView:document.querySelector('#sw'),
+  canvas3d:document.querySelector('#c'), canvas2d:document.querySelector('#m'),
+  ctx3d:document.querySelector('#c').getContext('2d'), ctx2d:document.querySelector('#m').getContext('2d')
+};
+
+const Math3D = {
+  v:(x,y,z)=>({x,y,z}),
+  add:(a,b)=>({x:a.x+b.x,y:a.y+b.y,z:a.z+b.z}),
+  sub:(a,b)=>({x:a.x-b.x,y:a.y-b.y,z:a.z-b.z}),
+  scale:(a,k)=>({x:a.x*k,y:a.y*k,z:a.z*k}),
+  dot:(a,b)=>a.x*b.x+a.y*b.y+a.z*b.z,
+  cross:(a,b)=>({x:a.y*b.z-a.z*b.y,y:a.z*b.x-a.x*b.z,z:a.x*b.y-a.y*b.x}),
+  norm(a){const l=Math.hypot(a.x,a.y,a.z)||1;return this.scale(a,1/l)},
+  reflect(d,n){return this.sub(d,this.scale(n,2*this.dot(d,n)))}
+};
+
+const Scene = {
+  sourcePosition(){return Math3D.v(STATE.source.x,STATE.source.y,STATE.source.z)},
+  sourceAim(){return Math3D.v(CONFIG.source.aim.x,CONFIG.source.aim.y,CONFIG.source.aim.z)},
+  pieceFrame(piece){
+    const a=piece.angleDeg*Math.PI/180;
+    const u=Math3D.v(Math.cos(a),Math.sin(a),0);
+    const n=Math3D.norm(Math3D.v(-Math.sin(a),Math.cos(a),0));
+    return {u,n,base:Math3D.v(piece.x,piece.y,0)};
+  },
+  pointOnPiece(piece,u01,z01){
+    const f=this.pieceFrame(piece);
+    return Math3D.add(Math3D.add(f.base,Math3D.scale(f.u,(u01-.5)*piece.size)),Math3D.v(0,0,z01*piece.size));
+  },
+  pieceCorners(piece){
+    const f=this.pieceFrame(piece);
+    const a=Math3D.add(f.base,Math3D.scale(f.u,-piece.size/2));
+    const b=Math3D.add(f.base,Math3D.scale(f.u,piece.size/2));
+    return [a,b,Math3D.add(b,Math3D.v(0,0,piece.size)),Math3D.add(a,Math3D.v(0,0,piece.size))];
+  },
+  boardCorners(){return [Math3D.v(0,0,0),Math3D.v(CONFIG.canvas.width,0,0),Math3D.v(CONFIG.canvas.width,CONFIG.canvas.height,0),Math3D.v(0,CONFIG.canvas.height,0)]}
+};
+
+const Optics = {
+
+  cieXYZ(lambda){
+    const g=(x,m,s)=>Math.exp(-0.5*((x-m)/s)**2);
+    const x=1.056*g(lambda,599.8,37.9)+0.362*g(lambda,442.0,16.0)-0.065*g(lambda,501.1,20.4);
+    const y=0.821*g(lambda,568.8,46.9)+0.286*g(lambda,530.9,16.3);
+    const z=1.217*g(lambda,437.0,11.8)+0.681*g(lambda,459.0,26.0);
+    return {x:Math.max(0,x),y:Math.max(0,y),z:Math.max(0,z)};
+  },
+  spectrumToRgb(samples){
+    let X=0,Y=0,Z=0,norm=0;
+    for(const s of samples){
+      const c=this.cieXYZ(s.lambda);
+      X+=c.x*s.value; Y+=c.y*s.value; Z+=c.z*s.value; norm+=c.y;
+    }
+    if(norm>0){X/=norm;Y/=norm;Z/=norm}
+    let r= 3.2406*X-1.5372*Y-0.4986*Z;
+    let g=-0.9689*X+1.8758*Y+0.0415*Z;
+    let b= 0.0557*X-0.2040*Y+1.0570*Z;
+    const gamma=v=>v<=0.0031308?12.92*v:1.055*Math.pow(Math.max(0,v),1/2.4)-0.055;
+    r=gamma(Math.max(0,r));g=gamma(Math.max(0,g));b=gamma(Math.max(0,b));
+    const max=Math.max(r,g,b,1e-6);
+    if(max>1){r/=max;g/=max;b/=max}
+    return {r:Math.min(1,r),g:Math.min(1,g),b:Math.min(1,b),lum:Math.max(0,Y)};
+  },
+  rgbCss(rgb,kind='R'){
+    const avg=(rgb.r+rgb.g+rgb.b)/3;
+    const sat=kind==='R'?3.2:2.5;
+    const exposure=kind==='R'?1.55:1.35;
+    const gamma=kind==='R'?.72:.80;
+    const boost=v=>{
+      v=avg+(v-avg)*sat;
+      v=Math.max(0,Math.min(1,v*exposure));
+      return Math.pow(v,gamma);
+    };
+    const c=v=>Math.max(0,Math.min(255,Math.round(boost(v)*255)));
+    return `rgb(${c(rgb.r)},${c(rgb.g)},${c(rgb.b)})`;
+  },
+  interfaceFresnel(cosI,n1,n2){
+    cosI=Math.max(0.0001,Math.min(1,cosI));
+    const sinT=(n1/n2)*Math.sqrt(Math.max(0,1-cosI*cosI));
+    if(sinT>=1)return {R:1,cosT:0};
+    const cosT=Math.sqrt(Math.max(0,1-sinT*sinT));
+    const rs=(n1*cosI-n2*cosT)/(n1*cosI+n2*cosT);
+    const rp=(n2*cosI-n1*cosT)/(n2*cosI+n1*cosT);
+    return {R:.5*(rs*rs+rp*rp),cosT};
+  },
+  filmSpectrum(cosI){
+    const n0=CONFIG.material.nOutside,n1=CONFIG.material.film.n,n2=CONFIG.material.nSlab;
+    const d=CONFIG.material.film.thicknessNm*1e-9;
+    const f01=this.interfaceFresnel(cosI,n0,n1);
+    const cos1=f01.cosT;
+    const f12=this.interfaceFresnel(cos1,n1,n2);
+    const R01=f01.R,R12=f12.R;
+    const root=2*Math.sqrt(Math.max(0,R01*R12));
+    const reflected=[],transmitted=[];
+    let avgR=0,count=0;
+    for(let lambda=400;lambda<=700;lambda+=15){
+      const phase=4*Math.PI*n1*d*cos1/(lambda*1e-9);
+      const cp=Math.cos(phase);
+      const den=1+R01*R12+root*cp;
+      const R=Math.max(0,Math.min(1,(R01+R12+root*cp)/Math.max(1e-6,den)));
+      const T=1-R;
+      reflected.push({lambda,value:R});
+      transmitted.push({lambda,value:T});
+      avgR+=R;count++;
+    }
+    const rgbR=this.spectrumToRgb(reflected),rgbT=this.spectrumToRgb(transmitted);
+    return {rgbR,rgbT,avgR:count?avgR/count:0,avgT:count?1-avgR/count:1};
+  },
+  intersectPlane(origin,dir,planePoint,planeNormal){
+    const den=Math3D.dot(dir,planeNormal); if(Math.abs(den)<1e-9)return null;
+    const t=Math3D.dot(Math3D.sub(planePoint,origin),planeNormal)/den; if(t<=1e-6)return null;
+    return Math3D.add(origin,Math3D.scale(dir,t));
+  },
+  intersectReceiver(origin,dir){return this.intersectPlane(origin,dir,Math3D.v(0,0,0),Math3D.v(0,0,1))},
+  refract(i,n,n1,n2){
+    const cosI=Math.max(0,Math.min(1,-Math3D.dot(n,i))),eta=n1/n2,k=1-eta*eta*(1-cosI*cosI);
+    if(k<0)return null;
+    return Math3D.norm(Math3D.add(Math3D.scale(i,eta),Math3D.scale(n,eta*cosI-Math.sqrt(k))));
+  },
+  fresnelDielectric(cosI,n1,n2){
+    cosI=Math.max(0,Math.min(1,cosI));
+    const sinT=(n1/n2)*Math.sqrt(Math.max(0,1-cosI*cosI)); if(sinT>=1)return 1;
+    const cosT=Math.sqrt(Math.max(0,1-sinT*sinT));
+    const rs=(n1*cosI-n2*cosT)/(n1*cosI+n2*cosT),rp=(n1*cosT-n2*cosI)/(n1*cosT+n2*cosI);
+    return .5*(rs*rs+rp*rp);
+  },
+  beamWeight(point){
+    const s=Scene.sourcePosition(),axis=Math3D.norm(Math3D.sub(Scene.sourceAim(),s)),d=Math3D.norm(Math3D.sub(point,s));
+    const cutoff=Math.cos(STATE.source.beamDeg*Math.PI/180),v=Math3D.dot(axis,d);
+    return v>cutoff?(v-cutoff)/(1-cutoff):0;
+  },
+  slabPath(piece,centerPoint){
+    const f=Scene.pieceFrame(piece),s=Scene.sourcePosition(),incoming=Math3D.norm(Math3D.sub(centerPoint,s));
+    const side=Math3D.dot(Math3D.sub(s,f.base),f.n)>=0?1:-1,n=Math3D.scale(f.n,side),half=CONFIG.material.thicknessCm/2;
+    const front=Math3D.add(centerPoint,Math3D.scale(n,half)),entry=this.intersectPlane(s,incoming,front,n); if(!entry)return null;
+    const beam=this.beamWeight(entry); if(!beam)return null;
+    const cosI=Math.max(0,Math.min(1,-Math3D.dot(n,incoming))); if(cosI<.001)return null;
+    const reflected=Math3D.norm(Math3D.reflect(incoming,n));
+    const inside=this.refract(incoming,n,CONFIG.material.nOutside,CONFIG.material.nSlab); if(!inside)return null;
+    const back=Math3D.add(centerPoint,Math3D.scale(n,-half)),exit=this.intersectPlane(entry,inside,back,n); if(!exit)return null;
+    const transmitted=this.refract(inside,n,CONFIG.material.nSlab,CONFIG.material.nOutside); if(!transmitted)return null;
+    const spec=this.filmSpectrum(cosI),rSlab=spec.avgR,tSlab=spec.avgT;
+    return {entry,exit,receiverR:this.intersectReceiver(entry,reflected),receiverT:this.intersectReceiver(exit,transmitted),weightR:beam*rSlab,weightT:beam*tSlab,rSlab,tSlab,colorR:this.rgbCss(spec.rgbR,'R'),colorT:this.rgbCss(spec.rgbT,'T'),lumR:spec.rgbR.lum,lumT:spec.rgbT.lum};
+  },
+  samples(piece){
+    const out=[],N=CONFIG.sampling.perAxis;
+    for(let i=0;i<N;i++)for(let j=0;j<N;j++){
+      const center=Scene.pointOnPiece(piece,(i+.5)/N,(j+.5)/N),path=this.slabPath(piece,center);
+      if(path&&(path.receiverR||path.receiverT))out.push(path);
+    }
+    return out;
+  },
+  coneDirections(){
+    const s=Scene.sourcePosition(),axis=Math3D.norm(Math3D.sub(Scene.sourceAim(),s));
+    const helper=Math.abs(axis.z)<.9?Math3D.v(0,0,1):Math3D.v(1,0,0),u=Math3D.norm(Math3D.cross(axis,helper)),v=Math3D.norm(Math3D.cross(u,axis));
+    const theta=STATE.source.beamDeg*Math.PI/180,out=[];
+    for(let k=0;k<CONFIG.source.coneSegments;k++){
+      const a=k*Math.PI*2/CONFIG.source.coneSegments,lateral=Math3D.add(Math3D.scale(u,Math.cos(a)),Math3D.scale(v,Math.sin(a)));
+      out.push(Math3D.norm(Math3D.add(Math3D.scale(axis,Math.cos(theta)),Math3D.scale(lateral,Math.sin(theta)))));
+    }
+    return out;
+  },
+  coneEnds(){const s=Scene.sourcePosition();return this.coneDirections().map(d=>this.intersectReceiver(s,d)||Math3D.add(s,Math3D.scale(d,CONFIG.source.fallbackConeLength)))}
+};
+const Camera = {
+  basis(){
+    const t=CONFIG.camera.target,d=CONFIG.camera.distance,c=Math.cos(STATE.camera.pitch);
+    const p=Math3D.v(t.x+d*c*Math.cos(STATE.camera.yaw),t.y+d*c*Math.sin(STATE.camera.yaw),t.z+d*Math.sin(STATE.camera.pitch));
+    const f=Math3D.norm(Math3D.sub(t,p));
+    const r=Math3D.norm(Math3D.cross(f,Math3D.v(0,0,1)));
+    const u=Math3D.norm(Math3D.cross(r,f));
+    return {p,f,r,u};
+  },
+  project(point,rect){
+    const c=this.basis(),q=Math3D.sub(point,c.p),z=Math3D.dot(q,c.f);
+    if(z<.1)return null;
+    const focal=Math.min(rect.width,rect.height)*CONFIG.camera.zoom;
+    return {x:rect.width/2+focal*Math3D.dot(q,c.r)/z,y:rect.height/2-focal*Math3D.dot(q,c.u)/z};
+  }
+};
+
+const Renderer3D = {
+  resize(){App.resizeCanvas(DOM.canvas3d,DOM.ctx3d)},
+  line(a,b,color='#fff',dash=[]){
+    const rect=DOM.canvas3d.getBoundingClientRect(),pa=Camera.project(a,rect),pb=Camera.project(b,rect);if(!pa||!pb)return;
+    const g=DOM.ctx3d;g.save();g.beginPath();g.moveTo(pa.x,pa.y);g.lineTo(pb.x,pb.y);g.strokeStyle=color;g.setLineDash(dash);g.stroke();g.restore();
+  },
+  poly(points,fill,stroke){
+    const rect=DOM.canvas3d.getBoundingClientRect(),q=points.map(p=>Camera.project(p,rect));if(q.some(p=>!p))return;
+    const g=DOM.ctx3d;g.beginPath();g.moveTo(q[0].x,q[0].y);q.slice(1).forEach(p=>g.lineTo(p.x,p.y));g.closePath();if(fill){g.fillStyle=fill;g.fill()}if(stroke){g.strokeStyle=stroke;g.stroke()}
+  },
+  drawCone(){
+    const g=DOM.ctx3d,s=Scene.sourcePosition(),ends=Optics.coneEnds(),rect=DOM.canvas3d.getBoundingClientRect(),sp=Camera.project(s,rect);if(!sp)return;
+    const sides=[];for(let i=0;i<ends.length;i++){const a=Camera.project(ends[i],rect),b=Camera.project(ends[(i+1)%ends.length],rect);if(a&&b)sides.push([sp,a,b])}
+    sides.forEach(pts=>{g.beginPath();g.moveTo(pts[0].x,pts[0].y);g.lineTo(pts[1].x,pts[1].y);g.lineTo(pts[2].x,pts[2].y);g.closePath();g.fillStyle=CONFIG.palette.coneFill;g.fill()});
+    const ring=ends.map(p=>Camera.project(p,rect));if(ring.every(Boolean)){g.beginPath();g.moveTo(ring[0].x,ring[0].y);ring.slice(1).forEach(p=>g.lineTo(p.x,p.y));g.closePath();g.strokeStyle=CONFIG.palette.coneRing;g.stroke()}
+    ends.forEach(p=>this.line(s,p,CONFIG.palette.coneLine,[3,5]));this.line(s,Scene.sourceAim(),CONFIG.palette.beamAxis,[5,4]);
+  },
+  drawSource(){
+    const g=DOM.ctx3d,rect=DOM.canvas3d.getBoundingClientRect(),src=Camera.project(Scene.sourcePosition(),rect);if(!src)return;
+    const rg=g.createRadialGradient(src.x,src.y,1,src.x,src.y,14);rg.addColorStop(0,'#fffbd0');rg.addColorStop(1,'#ffe07000');g.fillStyle=rg;g.beginPath();g.arc(src.x,src.y,14,0,Math.PI*2);g.fill();
+  },
+  render(){
+    const g=DOM.ctx3d,rect=DOM.canvas3d.getBoundingClientRect();g.clearRect(0,0,rect.width,rect.height);
+    this.poly(Scene.boardCorners(),CONFIG.palette.boardFill,CONFIG.palette.boardStroke);
+    for(let i=0;i<=CONFIG.canvas.width;i+=CONFIG.canvas.gridStep){this.line(Math3D.v(i,0,0),Math3D.v(i,CONFIG.canvas.height,0),CONFIG.palette.grid)}
+    for(let i=0;i<=CONFIG.canvas.height;i+=CONFIG.canvas.gridStep){this.line(Math3D.v(0,i,0),Math3D.v(CONFIG.canvas.width,i,0),CONFIG.palette.grid)}
+    this.drawCone();
+    let total=0,lit=0;
+    CONFIG.pieces.forEach(piece=>{
+      const samples=Optics.samples(piece);if(samples.length)lit++;total+=samples.length;
+      samples.forEach((r,i)=>{
+        if(i%CONFIG.sampling.reflectedRayStride===0){if(r.receiverR)this.line(r.entry,r.receiverR,r.colorR);if(r.receiverT)this.line(r.exit,r.receiverT,r.colorT,[4,4])}
+        if(r.receiverR){const q=Camera.project(r.receiverR,rect);if(q){g.save();g.globalAlpha=.18+Math.min(.78,r.weightR*(3.0+3.0*r.lumR));g.shadowBlur=7;g.shadowColor=r.colorR;g.fillStyle=r.colorR;g.fillRect(q.x-1.6,q.y-1.6,3.2,3.2);g.restore()}}
+        if(r.receiverT){const q=Camera.project(r.receiverT,rect);if(q){g.save();g.globalAlpha=.16+Math.min(.58,r.weightT*(.42+.55*r.lumT));g.shadowBlur=5;g.shadowColor=r.colorT;g.fillStyle=r.colorT;g.fillRect(q.x-1.4,q.y-1.4,2.8,2.8);g.restore()}}
+      });
+      this.poly(Scene.pieceCorners(piece),CONFIG.palette.pieceFill,CONFIG.palette.pieceStroke);
+    });
+    this.drawSource();
+    const all=CONFIG.pieces.flatMap(p=>Optics.samples(p)),avg=all.length?all.reduce((a,r)=>a+r.rSlab,0)/all.length:0;DOM.status.textContent=`${lit}/${CONFIG.pieces.length} plaques • ${total} impacts • R≈${(100*avg).toFixed(1)}% / T≈${(100*(1-avg)).toFixed(1)}% • couleurs renforcées`;
+  }
+};
+
+const Renderer2D = {
+  resize(){App.resizeCanvas(DOM.canvas2d,DOM.ctx2d)},
+  mapPoint(p,rect,bounds){const m=20,k=Math.min((rect.width-40)/(bounds.maxX-bounds.minX),(rect.height-40)/(bounds.maxY-bounds.minY));return{x:m+(p.x-bounds.minX)*k,y:rect.height-m-(p.y-bounds.minY)*k}},
+  render(){
+    const g=DOM.ctx2d,rect=DOM.canvas2d.getBoundingClientRect(),sets=CONFIG.pieces.map(p=>Optics.samples(p));
+    const all=[Math3D.v(0,0,0),Math3D.v(CONFIG.canvas.width,CONFIG.canvas.height,0)];sets.flat().forEach(x=>{if(x.receiverR)all.push(x.receiverR);if(x.receiverT)all.push(x.receiverT)});
+    const xs=all.map(p=>p.x),ys=all.map(p=>p.y),bounds={minX:Math.min(...xs)-3,maxX:Math.max(...xs)+3,minY:Math.min(...ys)-3,maxY:Math.max(...ys)+3};
+    g.clearRect(0,0,rect.width,rect.height);g.fillStyle=CONFIG.palette.background;g.fillRect(0,0,rect.width,rect.height);
+    const board=Scene.boardCorners().map(p=>this.mapPoint(p,rect,bounds));g.beginPath();g.moveTo(board[0].x,board[0].y);board.slice(1).forEach(p=>g.lineTo(p.x,p.y));g.closePath();g.fillStyle=CONFIG.palette.boardFill;g.fill();g.strokeStyle=CONFIG.palette.boardStroke;g.stroke();
+    sets.forEach(arr=>arr.forEach(r=>{if(r.receiverT){const q=this.mapPoint(r.receiverT,rect,bounds);g.globalAlpha=.27;g.fillStyle=r.colorT;g.fillRect(q.x-1.5,q.y-1.5,3,3)}if(r.receiverR){const q=this.mapPoint(r.receiverR,rect,bounds);g.globalAlpha=.32+Math.min(.64,r.weightR*5);g.fillStyle=r.colorR;g.fillRect(q.x-1.6,q.y-1.6,3.2,3.2)}}));g.globalAlpha=1;
+  }
+};
+
+const UI = {
+  init(){
+    const bindings=[['x','x'],['y','y'],['z','z'],['f','beamDeg']];
+    bindings.forEach(([id,key])=>{const input=document.querySelector('#'+id),out=document.querySelector('#'+id+'v');const sync=()=>{STATE.source[key]=+input.value;out.textContent=input.value+(id==='f'?'°':' cm');App.render()};input.addEventListener('input',sync);sync()});
+    DOM.switchView.addEventListener('click',()=>{STATE.view=STATE.view==='3d'?'2d':'3d';DOM.canvas3d.classList.toggle('hide',STATE.view!=='3d');DOM.canvas2d.classList.toggle('hide',STATE.view!=='2d');DOM.switchView.textContent=STATE.view==='3d'?'Vue 2D':'Vue 3D';requestAnimationFrame(()=>App.render())});
+    DOM.canvas3d.addEventListener('pointerdown',e=>{STATE.pointer.dragging=true;STATE.pointer.x=e.clientX;STATE.pointer.y=e.clientY;DOM.canvas3d.setPointerCapture(e.pointerId)});
+    DOM.canvas3d.addEventListener('pointermove',e=>{if(!STATE.pointer.dragging)return;STATE.camera.yaw-=(e.clientX-STATE.pointer.x)*CONFIG.camera.dragSensitivity;STATE.camera.pitch=Math.max(CONFIG.camera.pitchMin,Math.min(CONFIG.camera.pitchMax,STATE.camera.pitch+(e.clientY-STATE.pointer.y)*CONFIG.camera.dragSensitivity));STATE.pointer.x=e.clientX;STATE.pointer.y=e.clientY;App.render()});
+    const stop=()=>STATE.pointer.dragging=false;DOM.canvas3d.addEventListener('pointerup',stop);DOM.canvas3d.addEventListener('pointercancel',stop);
+  }
+};
+
+const App = {
+  resizeCanvas(canvas,ctx){const r=canvas.getBoundingClientRect(),d=Math.min(devicePixelRatio||1,2);if(r.width<20||r.height<20)return false;canvas.width=r.width*d;canvas.height=r.height*d;ctx.setTransform(d,0,0,d,0,0);return true},
+  render(){if(STATE.view==='3d'){if(this.resizeCanvas(DOM.canvas3d,DOM.ctx3d))Renderer3D.render()}else{if(this.resizeCanvas(DOM.canvas2d,DOM.ctx2d))Renderer2D.render()}},
+  boot(){UI.init();new ResizeObserver(()=>requestAnimationFrame(()=>this.render())).observe(DOM.app);let frames=0;const loop=()=>{this.render();if(frames++<90)requestAnimationFrame(loop)};requestAnimationFrame(loop);setTimeout(()=>this.render(),300);setTimeout(()=>this.render(),800);setTimeout(()=>this.render(),1500);addEventListener('pageshow',()=>setTimeout(()=>this.render(),100))}
+};
+
+App.boot();
+</script>
