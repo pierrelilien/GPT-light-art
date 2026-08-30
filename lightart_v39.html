@@ -1,0 +1,550 @@
+<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0d1015;color:#fff;font:14px -apple-system,Arial;padding-bottom:190px}
+main{padding:10px;max-width:850px;margin:auto}
+header{display:flex;justify-content:space-between;align-items:center}
+h1{font-size:22px;margin:0}
+button{background:#242b36;color:#fff;border:1px solid #465064;border-radius:10px;padding:9px 12px;font-weight:700}
+.headBtns{display:flex;gap:6px}
+.headBtns button:first-child{background:#151a22;color:#b9c5d6}
+.headBtns button.on{background:#2d3b4d;color:#fff}
+#st{display:block;color:#cbd5e1;margin:8px 0;line-height:1.35}
+canvas{width:100%;height:62vh;min-height:455px;background:#11151b;border:1px solid #303743;border-radius:14px;touch-action:none}
+.hide{display:none}
+.dock{position:fixed;left:8px;right:8px;bottom:max(8px,env(safe-area-inset-bottom));max-width:834px;margin:auto;background:#151a22f7;border:1px solid #354050;border-radius:16px;padding:10px;z-index:9}
+.dock label{display:grid;grid-template-columns:70px 1fr 55px;gap:8px;align-items:center;margin:7px 0}
+.dock b{text-align:right;font-size:12px}
+input{width:100%}
+</style>
+<main id="app">
+<header>
+  <h1>Light Art V3.9</h1>
+  <div class="headBtns">
+    <button id="dbg">Debug OFF</button>
+    <button id="sw">Vue 2D</button>
+  </div>
+</header>
+<small id="st"></small>
+<canvas id="c"></canvas>
+<canvas id="m" class="hide"></canvas>
+<div class="dock">
+  <label>X<input id="x" type="range" min="-30" max="50" value="28"><b id="xv"></b></label>
+  <label>Y<input id="y" type="range" min="-30" max="50" value="-12"><b id="yv"></b></label>
+  <label>Z<input id="z" type="range" min="5" max="70" value="32"><b id="zv"></b></label>
+  <label>Faisceau<input id="f" type="range" min="5" max="55" value="28"><b id="fv"></b></label>
+  <label>Rotation<input id="rot" type="range" min="-180" max="180" value="0"><b id="rotv"></b></label>
+  <label>Inclinaison<input id="tilt" type="range" min="-70" max="70" value="0"><b id="tiltv"></b></label>
+</div>
+</main>
+<script>
+'use strict';
+
+const CONFIG = Object.freeze({
+  canvas: { width:20, height:20, gridStep:2 },
+  sampling: { perAxis:11 },
+  camera: {
+    target:{x:10,y:10,z:1.5}, distance:48, zoom:1.16,
+    yaw:-0.75, pitch:0.72, pitchMin:0.15, pitchMax:1.45, dragSensitivity:0.008
+  },
+  source: {
+    x:28, y:-12, z:32, beamDeg:28, referenceBeamDeg:28,
+    aim:{x:10,y:10,z:0}, fallbackConeLength:70,
+    photometry:{ beamExponent:.72, maxBeamGain:9, distanceExponent:2 }
+  },
+  material: {
+    nOutside:1.0003, nSlab:1.49, thicknessCm:0.20, absorptionPerCm:0.07,
+    film:{ n:1.75, thicknessNm:185 },
+    wavelengthsNm:[450,540,630],
+    rgbForDisplay:[[110,170,255],[120,255,170],[255,120,210]]
+  },
+  pieces: [
+    {id:'p1',x:6.5,y:13.5,size:4,angleDeg:25,tintShift: 18},
+    {id:'p2',x:12,y:10.5,size:3,angleDeg:105,tintShift:-8},
+    {id:'p3',x:10.5,y:5.5,size:2.5,angleDeg:-20,tintShift:35}
+  ],
+  beamVisual: {
+    ringSegments:18,
+    shellSteps:[0.20,0.42,0.68,0.96],
+    shellOpacity:[0.06,0.05,0.04,0.03],
+    ringOpacity:[0.18,0.12,0.08,0.05],
+    axisWidthBase:1.6,
+    axisGlowBase:9
+  },
+  palette: {
+    boardFill:'#24405a66', boardStroke:'#bfe1ff', grid:'#ffffff18',
+    pieceFill:'#d5f0ff22', pieceStroke:'#e6f7ff', background:'#11151b',
+    beamAxis:'#ffe392', coneFill:'rgba(255,220,105,.04)', coneLine:'rgba(255,227,146,.18)',
+    transmit:'#eefaff'
+  }
+});
+
+const STATE = {
+  view:'3d', debug:false,
+  camera:{ yaw:CONFIG.camera.yaw, pitch:CONFIG.camera.pitch },
+  source:{ x:CONFIG.source.x, y:CONFIG.source.y, z:CONFIG.source.z, beamDeg:CONFIG.source.beamDeg, rotationDeg:0, tiltDeg:0 },
+  pointer:{ dragging:false, x:0, y:0 }
+};
+
+const DOM = {
+  app:document.querySelector('#app'), status:document.querySelector('#st'),
+  switchView:document.querySelector('#sw'), debugBtn:document.querySelector('#dbg'),
+  canvas3d:document.querySelector('#c'), canvas2d:document.querySelector('#m'),
+  ctx3d:document.querySelector('#c').getContext('2d'), ctx2d:document.querySelector('#m').getContext('2d')
+};
+
+const Math3D = {
+  v:(x,y,z)=>({x,y,z}),
+  add:(a,b)=>({x:a.x+b.x,y:a.y+b.y,z:a.z+b.z}),
+  sub:(a,b)=>({x:a.x-b.x,y:a.y-b.y,z:a.z-b.z}),
+  scale:(a,k)=>({x:a.x*k,y:a.y*k,z:a.z*k}),
+  dot:(a,b)=>a.x*b.x+a.y*b.y+a.z*b.z,
+  cross:(a,b)=>({x:a.y*b.z-a.z*b.y,y:a.z*b.x-a.x*b.z,z:a.x*b.y-a.y*b.x}),
+  clamp:(x,a,b)=>Math.max(a,Math.min(b,x)),
+  mix:(a,b,t)=>a*(1-t)+b*t,
+  norm(a){const l=Math.hypot(a.x,a.y,a.z)||1;return this.scale(a,1/l)},
+  reflect(d,n){return this.sub(d,this.scale(n,2*this.dot(d,n)))},
+  dist:(a,b)=>Math.hypot(a.x-b.x,a.y-b.y,a.z-b.z)
+};
+
+const Color = {
+  clamp01:x=>Math.max(0,Math.min(1,x)),
+  rgb(r,g,b,a=1){return `rgba(${Math.round(r)},${Math.round(g)},${Math.round(b)},${a})`},
+  from01(arr,a=1){return this.rgb(arr[0]*255,arr[1]*255,arr[2]*255,a)},
+  mul(arr,k){return [arr[0]*k,arr[1]*k,arr[2]*k]},
+  add(a,b){return [a[0]+b[0],a[1]+b[1],a[2]+b[2]]},
+  max01(arr){return [this.clamp01(arr[0]),this.clamp01(arr[1]),this.clamp01(arr[2])]},
+  luminance(arr){return .2126*arr[0]+.7152*arr[1]+.0722*arr[2]},
+  display(arr,boost=1.55){
+    const m=Math.max(arr[0],arr[1],arr[2],1e-6);
+    const n=[arr[0]/m,arr[1]/m,arr[2]/m];
+    const l=this.luminance(n);
+    return this.max01(n.map(v=>Math.max(0,l+(v-l)*boost)));
+  }
+};
+
+const Scene = {
+  sourcePosition(){return Math3D.v(STATE.source.x,STATE.source.y,STATE.source.z)},
+  sourceAim(){
+    const s=this.sourcePosition();
+    const baseTarget=Math3D.v(CONFIG.source.aim.x,CONFIG.source.aim.y,CONFIG.source.aim.z);
+    const baseDir=Math3D.norm(Math3D.sub(baseTarget,s));
+    const pan=STATE.source.rotationDeg*Math.PI/180;
+    const tilt=STATE.source.tiltDeg*Math.PI/180;
+    const cp=Math.cos(pan),sp=Math.sin(pan);
+    const panned=Math3D.norm(Math3D.v(baseDir.x*cp-baseDir.y*sp,baseDir.x*sp+baseDir.y*cp,baseDir.z));
+    let right=Math3D.cross(panned,Math3D.v(0,0,1));
+    if(Math.hypot(right.x,right.y,right.z)<1e-6) right=Math3D.v(1,0,0);
+    right=Math3D.norm(right);
+    const ct=Math.cos(tilt),st=Math.sin(tilt);
+    const tilted=Math3D.norm(Math3D.add(Math3D.scale(panned,ct),Math3D.scale(Math3D.cross(right,panned),st)));
+    const distance=Math3D.dist(s,baseTarget);
+    return Math3D.add(s,Math3D.scale(tilted,distance));
+  },
+  pieceFrame(piece){
+    const a=piece.angleDeg*Math.PI/180;
+    const u=Math3D.v(Math.cos(a),Math.sin(a),0);
+    const n=Math3D.norm(Math3D.v(-Math.sin(a),Math.cos(a),0));
+    return {u,n,base:Math3D.v(piece.x,piece.y,0)};
+  },
+  pointOnPiece(piece,u01,z01){
+    const f=this.pieceFrame(piece);
+    return Math3D.add(Math3D.add(f.base,Math3D.scale(f.u,(u01-.5)*piece.size)),Math3D.v(0,0,z01*piece.size));
+  },
+  pieceCorners(piece){
+    const f=this.pieceFrame(piece);
+    const a=Math3D.add(f.base,Math3D.scale(f.u,-piece.size/2));
+    const b=Math3D.add(f.base,Math3D.scale(f.u,piece.size/2));
+    return [a,b,Math3D.add(b,Math3D.v(0,0,piece.size)),Math3D.add(a,Math3D.v(0,0,piece.size))];
+  },
+  boardCorners(){return [Math3D.v(0,0,0),Math3D.v(CONFIG.canvas.width,0,0),Math3D.v(CONFIG.canvas.width,CONFIG.canvas.height,0),Math3D.v(0,CONFIG.canvas.height,0)]}
+};
+
+const Optics = {
+  intersectPlane(origin,dir,planePoint,planeNormal){
+    const den=Math3D.dot(dir,planeNormal); if(Math.abs(den)<1e-9)return null;
+    const t=Math3D.dot(Math3D.sub(planePoint,origin),planeNormal)/den; if(t<=1e-6)return null;
+    return Math3D.add(origin,Math3D.scale(dir,t));
+  },
+  intersectReceiver(origin,dir){return this.intersectPlane(origin,dir,Math3D.v(0,0,0),Math3D.v(0,0,1))},
+  refract(i,n,n1,n2){
+    const cosI=Math.max(0,Math.min(1,-Math3D.dot(n,i))),eta=n1/n2,k=1-eta*eta*(1-cosI*cosI);
+    if(k<0)return null;
+    return Math3D.norm(Math3D.add(Math3D.scale(i,eta),Math3D.scale(n,eta*cosI-Math.sqrt(k))));
+  },
+  fresnelDielectric(cosI,n1,n2){
+    cosI=Math.max(0,Math.min(1,cosI));
+    const sinT=(n1/n2)*Math.sqrt(Math.max(0,1-cosI*cosI)); if(sinT>=1)return 1;
+    const cosT=Math.sqrt(Math.max(0,1-sinT*sinT));
+    const rs=(n1*cosI-n2*cosT)/(n1*cosI+n2*cosT), rp=(n1*cosT-n2*cosI)/(n1*cosT+n2*cosI);
+    return .5*(rs*rs+rp*rp);
+  },
+  beamSolidAngle(deg){const a=Math.max(.5,deg)*Math.PI/180; return 2*Math.PI*(1-Math.cos(a))},
+  beamPowerGain(){
+    const p=CONFIG.source.photometry;
+    const ref=this.beamSolidAngle(CONFIG.source.referenceBeamDeg), cur=this.beamSolidAngle(STATE.source.beamDeg);
+    return Math.min(p.maxBeamGain,Math.pow(ref/Math.max(cur,1e-6),p.beamExponent));
+  },
+  distanceGain(point){
+    const s=Scene.sourcePosition();
+    const refDist=Math.hypot(CONFIG.source.x-CONFIG.source.aim.x,CONFIG.source.y-CONFIG.source.aim.y,CONFIG.source.z-CONFIG.source.aim.z);
+    const dist=Math.hypot(point.x-s.x,point.y-s.y,point.z-s.z);
+    return Math.pow(refDist/Math.max(dist,1),CONFIG.source.photometry.distanceExponent);
+  },
+  beamWeight(point){
+    const s=Scene.sourcePosition(), axis=Math3D.norm(Math3D.sub(Scene.sourceAim(),s)), d=Math3D.norm(Math3D.sub(point,s));
+    const cutoff=Math.cos(STATE.source.beamDeg*Math.PI/180), v=Math3D.dot(axis,d);
+    if(v<=cutoff)return 0;
+    const cone=(v-cutoff)/(1-cutoff), profile=Math.pow(cone,1.35);
+    return profile*this.beamPowerGain()*this.distanceGain(point);
+  },
+  thinFilmRgb(cosI,piece){
+    const n0=CONFIG.material.nOutside, nf=CONFIG.material.film.n, ns=CONFIG.material.nSlab, d=CONFIG.material.film.thicknessNm;
+    const tShift=(piece.tintShift||0)*1.7, base=CONFIG.material.rgbForDisplay;
+    const outR=[0,0,0], outT=[0,0,0];
+    const sinTf=(n0/nf)*Math.sqrt(Math.max(0,1-cosI*cosI));
+    const cosTf=Math.sqrt(Math.max(0,1-sinTf*sinTf));
+    const phaseAngleBias=(1-cosI)*(75+tShift);
+    for(let c=0;c<3;c++){
+      const lambda=CONFIG.material.wavelengthsNm[c];
+      const r01=this.fresnelDielectric(cosI,n0,nf);
+      const r12=this.fresnelDielectric(cosTf,nf,ns);
+      const delta=(4*Math.PI*nf*d*cosTf)/lambda + phaseAngleBias*Math.PI/180;
+      const mod=.5*(1+Math.cos(delta));
+      const filmR=Math3D.clamp(r01+r12+2*Math.sqrt(r01*r12)*(2*mod-1),0,0.96);
+      const baseHueWeight=.82 + 0.18*Math.sin((c*1.9)+(piece.tintShift||0)*0.12+(1-cosI)*4.2);
+      outR[c]=Math3D.clamp(base[c][0]/255*(.42+.58*filmR)*baseHueWeight,0,1);
+      const tBare=Math.max(0,1-this.fresnelDielectric(cosI,n0,ns));
+      const filmT=Math.max(0.03,Math.min(0.97,tBare*(1-.55*filmR)));
+      outT[c]=Math3D.clamp(base[c][1]/255*(.30+.78*filmT),0,1);
+    }
+    return { rgbR:Color.max01(outR), rgbT:Color.max01(outT) };
+  },
+  slabPath(piece,centerPoint){
+    const f=Scene.pieceFrame(piece), s=Scene.sourcePosition(), incoming=Math3D.norm(Math3D.sub(centerPoint,s));
+    const side=Math3D.dot(Math3D.sub(s,f.base),f.n)>=0?1:-1, n=Math3D.scale(f.n,side), half=CONFIG.material.thicknessCm/2;
+    const front=Math3D.add(centerPoint,Math3D.scale(n,half)), entry=this.intersectPlane(s,incoming,front,n); if(!entry)return null;
+    const beam=this.beamWeight(entry); if(!beam)return null;
+    const cosI=Math.max(0,Math.min(1,-Math3D.dot(n,incoming))); if(cosI<.001)return null;
+    const reflected=Math3D.norm(Math3D.reflect(incoming,n));
+    const inside=this.refract(incoming,n,CONFIG.material.nOutside,CONFIG.material.nSlab); if(!inside)return null;
+    const back=Math3D.add(centerPoint,Math3D.scale(n,-half)), exit=this.intersectPlane(entry,inside,back,n); if(!exit)return null;
+    const transmitted=this.refract(inside,n,CONFIG.material.nSlab,CONFIG.material.nOutside); if(!transmitted)return null;
+
+    const rSurface=this.fresnelDielectric(cosI,CONFIG.material.nOutside,CONFIG.material.nSlab);
+    const rBoost=Math3D.mix(1.25,0.85,Math.pow(cosI,.45));
+    const rSlab=Math3D.clamp(rSurface*rBoost,0.03,0.88);
+    const travel=Math.hypot(exit.x-entry.x,exit.y-entry.y,exit.z-entry.z);
+    const absorption=Math.exp(-CONFIG.material.absorptionPerCm*travel);
+    const tSlab=Math.max(0,(1-rSlab)*absorption);
+    const balance=1/(rSlab+tSlab||1);
+    const normR=rSlab*balance, normT=tSlab*balance;
+
+    const spectra=this.thinFilmRgb(cosI,piece);
+    const angGain=Math.pow(cosI,0.72);
+    const rgbR=Color.mul(spectra.rgbR,beam*normR*angGain*1.75);
+    const rgbT=Color.mul(spectra.rgbT,beam*normT*Math.pow(cosI,0.55)*1.35);
+
+    return {
+      entry, exit,
+      receiverR:this.intersectReceiver(entry,reflected),
+      receiverT:this.intersectReceiver(exit,transmitted),
+      weightR:Color.luminance(rgbR), weightT:Color.luminance(rgbT),
+      rSlab:normR, tSlab:normT, ci:cosI, rgbR, rgbT,
+      colorR:Color.from01(Color.max01(rgbR)),
+      colorT:Color.from01(Color.max01(rgbT))
+    };
+  },
+  samples(piece){
+    const out=[],N=CONFIG.sampling.perAxis;
+    for(let i=0;i<N;i++) for(let j=0;j<N;j++) {
+      const center=Scene.pointOnPiece(piece,(i+.5)/N,(j+.5)/N), path=this.slabPath(piece,center);
+      if(path&&(path.receiverR||path.receiverT)) out.push(path);
+    }
+    return out;
+  },
+  beamFrame(){
+    const s=Scene.sourcePosition();
+    const axis=Math3D.norm(Math3D.sub(Scene.sourceAim(),s));
+    const helper=Math.abs(axis.z)<.9?Math3D.v(0,0,1):Math3D.v(1,0,0);
+    const u=Math3D.norm(Math3D.cross(axis,helper));
+    const v=Math3D.norm(Math3D.cross(u,axis));
+    return {source:s,axis,u,v};
+  },
+  beamRing(distance,angleScale=1){
+    const f=this.beamFrame();
+    const theta=STATE.source.beamDeg*Math.PI/180*angleScale;
+    const radius=Math.tan(theta)*distance;
+    const center=Math3D.add(f.source,Math3D.scale(f.axis,distance));
+    const pts=[];
+    for(let k=0;k<CONFIG.beamVisual.ringSegments;k++){
+      const a=(Math.PI*2*k)/CONFIG.beamVisual.ringSegments;
+      const radial=Math3D.add(Math3D.scale(f.u,Math.cos(a)*radius),Math3D.scale(f.v,Math.sin(a)*radius));
+      pts.push(Math3D.add(center,radial));
+    }
+    return pts;
+  }
+};
+
+const TraceCache = {
+  key:'', sets:[], all:[],
+  makeKey(){return `${STATE.source.x}|${STATE.source.y}|${STATE.source.z}|${STATE.source.beamDeg}|${STATE.source.rotationDeg}|${STATE.source.tiltDeg}`},
+  get(){
+    const key=this.makeKey();
+    if(key===this.key)return this;
+    this.sets=CONFIG.pieces.map(piece=>Optics.samples(piece));
+    this.all=this.sets.flat();
+    this.key=key;
+    return this;
+  },
+  invalidate(){this.key=''}
+};
+
+const Footprints = {
+  cross2(o,a,b){return (a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x)},
+  hull(points){
+    const pts=points.filter(Boolean).slice().sort((a,b)=>a.x-b.x||a.y-b.y);
+    if(pts.length<=2)return pts;
+    const lo=[]; for(const p of pts){while(lo.length>=2&&this.cross2(lo[lo.length-2],lo[lo.length-1],p)<=0)lo.pop(); lo.push(p)}
+    const hi=[]; for(let i=pts.length-1;i>=0;i--){const p=pts[i]; while(hi.length>=2&&this.cross2(hi[hi.length-2],hi[hi.length-1],p)<=0)hi.pop(); hi.push(p)}
+    lo.pop(); hi.pop(); return lo.concat(hi);
+  },
+  branch(samples,pointKey,rgbKey,weightKey){
+    const valid=samples.filter(s=>s[pointKey]); if(!valid.length)return null;
+    const hull=this.hull(valid.map(s=>s[pointKey]));
+    let rgb=[0,0,0],w=0,power=0;
+    for(const s of valid){
+      const k=Math.max(.002,s[weightKey]);
+      rgb[0]+=s[rgbKey][0]*k; rgb[1]+=s[rgbKey][1]*k; rgb[2]+=s[rgbKey][2]*k;
+      w+=k; power+=s[weightKey];
+    }
+    if(w) rgb=rgb.map(v=>v/w);
+    power/=valid.length;
+    return { hull, rgb:Color.display(rgb,1.8), power, rep:valid[Math.floor(valid.length/2)] };
+  },
+  forSamples(samples){return {R:this.branch(samples,'receiverR','rgbR','weightR'), T:this.branch(samples,'receiverT','rgbT','weightT')}}
+};
+
+const Camera = {
+  basis(){
+    const t=CONFIG.camera.target,d=CONFIG.camera.distance,c=Math.cos(STATE.camera.pitch);
+    const p=Math3D.v(t.x+d*c*Math.cos(STATE.camera.yaw),t.y+d*c*Math.sin(STATE.camera.yaw),t.z+d*Math.sin(STATE.camera.pitch));
+    const f=Math3D.norm(Math3D.sub(t,p));
+    const r=Math3D.norm(Math3D.cross(f,Math3D.v(0,0,1)));
+    const u=Math3D.norm(Math3D.cross(r,f));
+    return {p,f,r,u};
+  },
+  project(point,rect){
+    const c=this.basis(),q=Math3D.sub(point,c.p),z=Math3D.dot(q,c.f);
+    if(z<.1)return null;
+    const focal=Math.min(rect.width,rect.height)*CONFIG.camera.zoom;
+    return {x:rect.width/2+focal*Math3D.dot(q,c.r)/z,y:rect.height/2-focal*Math3D.dot(q,c.u)/z};
+  }
+};
+
+const Renderer3D = {
+  line(a,b,color='#fff',dash=[],width=1){
+    const rect=DOM.canvas3d.getBoundingClientRect(),pa=Camera.project(a,rect),pb=Camera.project(b,rect); if(!pa||!pb)return;
+    const g=DOM.ctx3d; g.save(); g.beginPath(); g.moveTo(pa.x,pa.y); g.lineTo(pb.x,pb.y); g.strokeStyle=color; g.lineWidth=width; g.setLineDash(dash); g.stroke(); g.restore();
+  },
+  poly(points,fill,stroke){
+    const rect=DOM.canvas3d.getBoundingClientRect(),q=points.map(p=>Camera.project(p,rect)); if(q.some(p=>!p)||q.length<3)return;
+    const g=DOM.ctx3d; g.beginPath(); g.moveTo(q[0].x,q[0].y); q.slice(1).forEach(p=>g.lineTo(p.x,p.y)); g.closePath(); if(fill){g.fillStyle=fill; g.fill()} if(stroke){g.strokeStyle=stroke; g.stroke()}
+  },
+  path(points){
+    const rect=DOM.canvas3d.getBoundingClientRect();
+    const q=points.map(p=>Camera.project(p,rect));
+    if(q.some(p=>!p)||q.length<2)return null;
+    return q;
+  },
+  drawPolygon2D(points,fill,stroke,lineWidth=1){
+    if(!points||points.length<3)return;
+    const g=DOM.ctx3d;
+    g.beginPath(); g.moveTo(points[0].x,points[0].y); points.slice(1).forEach(p=>g.lineTo(p.x,p.y)); g.closePath();
+    if(fill){g.fillStyle=fill; g.fill()} if(stroke){g.lineWidth=lineWidth; g.strokeStyle=stroke; g.stroke()}
+  },
+  drawBeamBeauty(){
+    const g=DOM.ctx3d, rect=DOM.canvas3d.getBoundingClientRect();
+    const src3=Scene.sourcePosition(), src2=Camera.project(src3,rect); if(!src2)return;
+    const aimDist=Math3D.dist(Scene.sourcePosition(),Scene.sourceAim());
+    const gain=Optics.beamPowerGain();
+    const intensity=Math3D.clamp(.72 + 0.11*gain, .72, 1.0);
+    const steps=CONFIG.beamVisual.shellSteps;
+    g.save();
+    g.globalCompositeOperation='screen';
+
+    for(let idx=steps.length-1; idx>=0; idx--){
+      const frac=steps[idx];
+      const ring3=Optics.beamRing(aimDist*frac, 1.0);
+      const ring2=this.path(ring3); if(!ring2)continue;
+      const alpha=CONFIG.beamVisual.shellOpacity[idx]*intensity;
+      for(let i=0;i<ring2.length;i++){
+        const a=ring2[i], b=ring2[(i+1)%ring2.length];
+        g.beginPath();
+        g.moveTo(src2.x,src2.y);
+        g.lineTo(a.x,a.y);
+        g.lineTo(b.x,b.y);
+        g.closePath();
+        g.fillStyle=`rgba(255,228,145,${alpha})`;
+        g.fill();
+      }
+      const ringAlpha=CONFIG.beamVisual.ringOpacity[idx]*intensity;
+      this.drawPolygon2D(ring2, null, `rgba(255,236,176,${ringAlpha})`, 1);
+    }
+
+    const axisEnd=Scene.sourceAim();
+    const a2=Camera.project(axisEnd,rect);
+    if(a2){
+      g.beginPath(); g.moveTo(src2.x,src2.y); g.lineTo(a2.x,a2.y);
+      g.lineWidth=CONFIG.beamVisual.axisWidthBase + Math.min(2.4, gain*.45);
+      g.strokeStyle=`rgba(255,236,190,${.36*intensity})`;
+      g.shadowColor='rgba(255,224,120,.85)';
+      g.shadowBlur=CONFIG.beamVisual.axisGlowBase + Math.min(18, gain*1.8);
+      g.stroke();
+      g.shadowBlur=0;
+      g.lineWidth=1.1;
+      g.strokeStyle=`rgba(255,252,230,${.72*intensity})`;
+      g.stroke();
+    }
+    g.restore();
+  },
+  drawBeamTechnical(){
+    const g=DOM.ctx3d;
+    const beamFrame=Optics.beamFrame();
+    const aimDist=Math3D.dist(Scene.sourcePosition(),Scene.sourceAim());
+    const outer=Optics.beamRing(aimDist,1.0);
+    const inner=Optics.beamRing(aimDist*.62,.66);
+    [inner,outer].forEach((ring,ri)=>{
+      const q=this.path(ring); if(!q)return;
+      this.drawPolygon2D(q,null,ri? 'rgba(255,227,146,.24)' : 'rgba(255,241,198,.16)',1);
+      for(let i=0;i<q.length;i+=3){
+        const p=q[i];
+        const src=Camera.project(beamFrame.source,DOM.canvas3d.getBoundingClientRect());
+        if(!src)break;
+        g.save(); g.beginPath(); g.moveTo(src.x,src.y); g.lineTo(p.x,p.y); g.setLineDash([3,5]); g.strokeStyle='rgba(255,227,146,.18)'; g.stroke(); g.restore();
+      }
+    });
+    this.line(Scene.sourcePosition(),Scene.sourceAim(),CONFIG.palette.beamAxis,[5,4],1.2);
+  },
+  drawSource(){
+    const g=DOM.ctx3d,rect=DOM.canvas3d.getBoundingClientRect(),src=Camera.project(Scene.sourcePosition(),rect); if(!src)return;
+    const rg=g.createRadialGradient(src.x,src.y,1,src.x,src.y,14);
+    rg.addColorStop(0,'#fffbd0'); rg.addColorStop(1,'#ffe07000');
+    g.fillStyle=rg; g.beginPath(); g.arc(src.x,src.y,14,0,Math.PI*2); g.fill();
+  },
+  footprint(branch,isReflection){
+    if(!branch||branch.hull.length<3)return;
+    const rect=DOM.canvas3d.getBoundingClientRect(),q=branch.hull.map(p=>Camera.project(p,rect)); if(q.some(p=>!p))return;
+    const g=DOM.ctx3d,base=Color.display(branch.rgb,isReflection?2.0:1.7),rgb=Color.from01(base);
+    const alpha=Math.min(isReflection?.82:.62,(isReflection?.30:.20)+branch.power*(isReflection?2.8:1.8));
+    const cx=q.reduce((s,p)=>s+p.x,0)/q.length,cy=q.reduce((s,p)=>s+p.y,0)/q.length;
+    const radius=Math.max(18,...q.map(p=>Math.hypot(p.x-cx,p.y-cy)));
+    const minX=Math.min(...q.map(p=>p.x)),maxX=Math.max(...q.map(p=>p.x)),minY=Math.min(...q.map(p=>p.y)),maxY=Math.max(...q.map(p=>p.y));
+    const linear=g.createLinearGradient(minX,minY,maxX,maxY);
+    linear.addColorStop(0,Color.from01(Color.max01(Color.mul(base,.78))));
+    linear.addColorStop(.45,Color.from01(Color.max01(Color.mul(base,1.22))));
+    linear.addColorStop(1,Color.from01(Color.max01(Color.mul(base,.72))));
+    const glow=g.createRadialGradient(cx,cy,0,cx,cy,radius*1.15);
+    glow.addColorStop(0,Color.from01(Color.max01(Color.mul(base,1.45)),.95));
+    glow.addColorStop(.55,Color.from01(base,.70));
+    glow.addColorStop(1,Color.from01(base,0));
+    g.save();
+    g.beginPath(); g.moveTo(q[0].x,q[0].y); q.slice(1).forEach(p=>g.lineTo(p.x,p.y)); g.closePath();
+    g.globalCompositeOperation='screen';
+    g.globalAlpha=alpha*.26; g.shadowColor=rgb; g.shadowBlur=isReflection?22:16; g.fillStyle=rgb; g.fill();
+    g.shadowBlur=0; g.globalAlpha=alpha*.72; g.fillStyle=linear; g.fill();
+    g.clip(); g.globalAlpha=alpha*.42; g.fillStyle=glow; g.fillRect(cx-radius*1.3,cy-radius*1.3,radius*2.6,radius*2.6);
+    g.restore();
+  },
+  render(){
+    const g=DOM.ctx3d,rect=DOM.canvas3d.getBoundingClientRect();
+    g.clearRect(0,0,rect.width,rect.height);
+    const bg=g.createRadialGradient(rect.width*.5,rect.height*.48,20,rect.width*.5,rect.height*.48,Math.max(rect.width,rect.height)*.72);
+    bg.addColorStop(0,'#182333'); bg.addColorStop(1,'#090d13');
+    g.fillStyle=bg; g.fillRect(0,0,rect.width,rect.height);
+    this.poly(Scene.boardCorners(),'rgba(24,67,103,.66)','rgba(190,225,255,.72)');
+    this.drawBeamBeauty();
+    if(STATE.debug){
+      for(let i=0;i<=CONFIG.canvas.width;i+=CONFIG.canvas.gridStep){this.line(Math3D.v(i,0,0),Math3D.v(i,CONFIG.canvas.height,0),CONFIG.palette.grid)}
+      for(let i=0;i<=CONFIG.canvas.height;i+=CONFIG.canvas.gridStep){this.line(Math3D.v(0,i,0),Math3D.v(CONFIG.canvas.width,i,0),CONFIG.palette.grid)}
+    }
+    const cache=TraceCache.get(); let total=cache.all.length, lit=0;
+    CONFIG.pieces.forEach((piece,pi)=>{
+      const samples=cache.sets[pi]; if(samples.length)lit++;
+      const fp=Footprints.forSamples(samples);
+      this.footprint(fp.T,false); this.footprint(fp.R,true);
+      if(STATE.debug&&fp.T?.rep?.receiverT)this.line(fp.T.rep.exit,fp.T.rep.receiverT,Color.from01(fp.T.rgb),[5,6]);
+      if(STATE.debug&&fp.R?.rep?.receiverR)this.line(fp.R.rep.entry,fp.R.rep.receiverR,Color.from01(fp.R.rgb));
+      this.poly(Scene.pieceCorners(piece),'rgba(212,244,255,.10)','rgba(238,250,255,.86)');
+    });
+    if(STATE.debug) this.drawBeamTechnical();
+    this.drawSource();
+    const avgR=cache.all.length?cache.all.reduce((a,r)=>a+r.rSlab,0)/cache.all.length:0;
+    DOM.status.textContent=STATE.debug
+      ? `${lit}/${CONFIG.pieces.length} plaques • ${total} échantillons • R≈${(100*avgR).toFixed(1)}% / T≈${(100*(1-avgR)).toFixed(1)}% • puissance ×${Optics.beamPowerGain().toFixed(1)}`
+      : `${lit}/${CONFIG.pieces.length} plaques éclairées • puissance ×${Optics.beamPowerGain().toFixed(1)} • faisceau visible`;
+  }
+};
+
+const Renderer2D = {
+  mapPoint(p,rect,bounds){const m=20,k=Math.min((rect.width-40)/(bounds.maxX-bounds.minX),(rect.height-40)/(bounds.maxY-bounds.minY)); return {x:m+(p.x-bounds.minX)*k, y:rect.height-m-(p.y-bounds.minY)*k}},
+  footprint(g,branch,rect,bounds,isReflection){
+    if(!branch||branch.hull.length<3)return;
+    const q=branch.hull.map(p=>this.mapPoint(p,rect,bounds));
+    const base=Color.display(branch.rgb,isReflection?2:1.7),col=Color.from01(base),alpha=Math.min(isReflection?.8:.6,(isReflection?.3:.2)+branch.power*(isReflection?2.8:1.8));
+    g.save(); g.beginPath(); g.moveTo(q[0].x,q[0].y); q.slice(1).forEach(p=>g.lineTo(p.x,p.y)); g.closePath();
+    g.globalCompositeOperation='screen'; g.globalAlpha=alpha*.28; g.shadowColor=col; g.shadowBlur=isReflection?20:14; g.fillStyle=col; g.fill();
+    g.shadowBlur=0; g.globalAlpha=alpha*.75; g.fillStyle=col; g.fill(); g.restore();
+  },
+  render(){
+    const g=DOM.ctx2d,rect=DOM.canvas2d.getBoundingClientRect(),sets=TraceCache.get().sets;
+    const all=[Math3D.v(0,0,0),Math3D.v(CONFIG.canvas.width,CONFIG.canvas.height,0)];
+    sets.flat().forEach(x=>{if(x.receiverR)all.push(x.receiverR); if(x.receiverT)all.push(x.receiverT)});
+    const xs=all.map(p=>p.x), ys=all.map(p=>p.y), bounds={minX:Math.min(...xs)-3,maxX:Math.max(...xs)+3,minY:Math.min(...ys)-3,maxY:Math.max(...ys)+3};
+    g.clearRect(0,0,rect.width,rect.height); g.fillStyle=CONFIG.palette.background; g.fillRect(0,0,rect.width,rect.height);
+    const board=Scene.boardCorners().map(p=>this.mapPoint(p,rect,bounds));
+    g.beginPath(); g.moveTo(board[0].x,board[0].y); board.slice(1).forEach(p=>g.lineTo(p.x,p.y)); g.closePath(); g.fillStyle=CONFIG.palette.boardFill; g.fill(); g.strokeStyle=CONFIG.palette.boardStroke; g.stroke();
+    sets.forEach(arr=>{const fp=Footprints.forSamples(arr); this.footprint(g,fp.T,rect,bounds,false); this.footprint(g,fp.R,rect,bounds,true)});
+  }
+};
+
+const UI = {
+  init(){
+    [['x','x'],['y','y'],['z','z'],['f','beamDeg'],['rot','rotationDeg'],['tilt','tiltDeg']].forEach(([id,key])=>{
+      const input=document.querySelector('#'+id),out=document.querySelector('#'+id+'v');
+      const sync=()=>{STATE.source[key]=+input.value; out.textContent=input.value+((id==='f'||id==='rot'||id==='tilt')?'°':' cm'); TraceCache.invalidate(); App.scheduleRender()};
+      input.addEventListener('input',sync); sync();
+    });
+    DOM.switchView.addEventListener('click',()=>{STATE.view=STATE.view==='3d'?'2d':'3d'; DOM.canvas3d.classList.toggle('hide',STATE.view!=='3d'); DOM.canvas2d.classList.toggle('hide',STATE.view!=='2d'); DOM.switchView.textContent=STATE.view==='3d'?'Vue 2D':'Vue 3D'; App.scheduleRender()});
+    DOM.debugBtn.addEventListener('click',()=>{STATE.debug=!STATE.debug; DOM.debugBtn.textContent=STATE.debug?'Debug ON':'Debug OFF'; DOM.debugBtn.classList.toggle('on',STATE.debug); App.scheduleRender()});
+    DOM.canvas3d.addEventListener('pointerdown',e=>{STATE.pointer.dragging=true; STATE.pointer.x=e.clientX; STATE.pointer.y=e.clientY; DOM.canvas3d.setPointerCapture(e.pointerId)});
+    DOM.canvas3d.addEventListener('pointermove',e=>{if(!STATE.pointer.dragging)return; STATE.camera.yaw-=(e.clientX-STATE.pointer.x)*CONFIG.camera.dragSensitivity; STATE.camera.pitch=Math.max(CONFIG.camera.pitchMin,Math.min(CONFIG.camera.pitchMax,STATE.camera.pitch+(e.clientY-STATE.pointer.y)*CONFIG.camera.dragSensitivity)); STATE.pointer.x=e.clientX; STATE.pointer.y=e.clientY; App.scheduleRender()});
+    const stop=()=>STATE.pointer.dragging=false; DOM.canvas3d.addEventListener('pointerup',stop); DOM.canvas3d.addEventListener('pointercancel',stop);
+  }
+};
+
+const App = {
+  raf:0,
+  resizeCanvas(canvas,ctx){
+    const r=canvas.getBoundingClientRect(),d=Math.min(devicePixelRatio||1,2);
+    if(r.width<20||r.height<20)return false;
+    const w=Math.round(r.width*d),h=Math.round(r.height*d);
+    if(canvas.width!==w||canvas.height!==h){canvas.width=w; canvas.height=h; ctx.setTransform(d,0,0,d,0,0)}
+    return true;
+  },
+  render(){
+    if(STATE.view==='3d'){ if(this.resizeCanvas(DOM.canvas3d,DOM.ctx3d)) Renderer3D.render() }
+    else { if(this.resizeCanvas(DOM.canvas2d,DOM.ctx2d)) Renderer2D.render() }
+  },
+  scheduleRender(){ if(this.raf)return; this.raf=requestAnimationFrame(()=>{this.raf=0; this.render()}) },
+  boot(){
+    UI.init();
+    new ResizeObserver(()=>this.scheduleRender()).observe(DOM.app);
+    let frames=0; const settle=()=>{this.scheduleRender(); if(++frames<12)requestAnimationFrame(settle)}; requestAnimationFrame(settle);
+    [250,700,1300].forEach(ms=>setTimeout(()=>this.scheduleRender(),ms));
+    addEventListener('pageshow',()=>setTimeout(()=>this.scheduleRender(),80));
+  }
+};
+
+App.boot();
+</script>
