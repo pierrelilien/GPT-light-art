@@ -1,0 +1,25 @@
+<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><body style="margin:0;background:#0d1015;color:white;font:14px -apple-system,Arial"><div id="loading" style="padding:24px">Chargement Light Art V4.0…</div><script>
+(async()=>{
+const url='https://raw.githubusercontent.com/pierrelilien/GPT-light-art/a4b47affb9cb70645819ebe90052e77fd2b011a2/lightart_v38.html';
+let s=await (await fetch(url,{cache:'no-store'})).text();
+s=s.replace('<h1>Light Art V3.8</h1>','<h1>Light Art V4.0</h1>');
+s=s.replace(/<div class="dock">[\s\S]*?<\/div>\s*<\/main>/,`<div class="dock">
+<label>Angle<input id="ang" type="range" min="-180" max="180" value="-45"><b id="angv"></b></label>
+<label>Rayon<input id="rad" type="range" min="5" max="40" value="22"><b id="radv"></b></label>
+<label>Z<input id="z" type="range" min="5" max="70" value="16"><b id="zv"></b></label>
+<label>Faisceau<input id="f" type="range" min="5" max="55" value="18"><b id="fv"></b></label>
+</div></main>`);
+s=s.replace('x:28, y:-12, z:32, beamDeg:28, referenceBeamDeg:28,','defaultAngleDeg:-45, defaultRadius:22, defaultZ:16, beamDeg:18, referenceBeamDeg:28,');
+s=s.replace("source:{ x:CONFIG.source.x, y:CONFIG.source.y, z:CONFIG.source.z, beamDeg:CONFIG.source.beamDeg },","source:{ angleDeg:CONFIG.source.defaultAngleDeg, radius:CONFIG.source.defaultRadius, z:CONFIG.source.defaultZ, beamDeg:CONFIG.source.beamDeg },");
+s=s.replace('sourcePosition(){return Math3D.v(STATE.source.x,STATE.source.y,STATE.source.z)},',`sourcePosition(){
+ const c=CONFIG.camera.target,a=STATE.source.angleDeg*Math.PI/180;
+ return Math3D.v(c.x+STATE.source.radius*Math.cos(a),c.y+STATE.source.radius*Math.sin(a),STATE.source.z)
+},`);
+s=s.replace('const refDist=Math.hypot(CONFIG.source.x-CONFIG.source.aim.x,CONFIG.source.y-CONFIG.source.aim.y,CONFIG.source.z-CONFIG.source.aim.z);','const refDist=Math.hypot(CONFIG.source.defaultRadius,CONFIG.source.defaultZ);');
+s=s.replace('makeKey(){return `${STATE.source.x}|${STATE.source.y}|${STATE.source.z}|${STATE.source.beamDeg}`},','makeKey(){return `${STATE.source.angleDeg}|${STATE.source.radius}|${STATE.source.z}|${STATE.source.beamDeg}`},');
+s=s.replace("[['x','x'],['y','y'],['z','z'],['f','beamDeg']]","[['ang','angleDeg'],['rad','radius'],['z','z'],['f','beamDeg']]");
+s=s.replace("out.textContent=input.value+(id==='f'?'°':' cm');","out.textContent=input.value+((id==='f'||id==='ang')?'°':' cm');");
+s=s.replace('`${lit}/${CONFIG.pieces.length} plaques éclairées • puissance ×${Optics.beamPowerGain().toFixed(1)} • faisceau visible`','`${lit}/${CONFIG.pieces.length} plaques éclairées • orbite ${STATE.source.angleDeg}° • puissance ×${Optics.beamPowerGain().toFixed(1)}`');
+document.open();document.write(s);document.close();
+})().catch(e=>{document.getElementById('loading').textContent='Erreur V4.0 : '+e.message;console.error(e)});
+</script>
