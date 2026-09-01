@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Light Art WebGL V6.1</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;background:#090c12;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;overflow:hidden}#app{position:fixed;inset:0}#view{position:absolute;inset:0 0 188px 0;touch-action:none}canvas{display:block;width:100%;height:100%}.top{position:absolute;left:12px;right:12px;top:max(10px,env(safe-area-inset-top));z-index:10;display:flex;align-items:flex-start;justify-content:space-between;gap:10px;pointer-events:none}.title{pointer-events:auto;background:#0b1018c9;border:1px solid #283244;border-radius:14px;padding:10px 12px;backdrop-filter:blur(10px)}.title h1{font-size:21px;margin:0 0 4px}.title small{color:#cbd5e1;line-height:1.25}.actions{display:flex;gap:6px;pointer-events:auto}button{border:1px solid #46536b;background:#202a39;color:#fff;border-radius:11px;padding:10px 13px;font-weight:750;font-size:13px}.on{background:#38527a}.dock{position:absolute;z-index:20;left:8px;right:8px;bottom:max(8px,env(safe-area-inset-bottom));max-width:850px;margin:auto;background:#121923f2;border:1px solid #36445b;border-radius:18px;padding:10px 12px;backdrop-filter:blur(14px);box-shadow:0 16px 60px #0008}.dock>button{width:100%;margin-bottom:7px}.row{display:grid;grid-template-columns:72px 1fr 66px;gap:8px;align-items:center;margin:7px 0}.row output{text-align:right;font-weight:700;font-size:13px;color:#f5f7fb}input[type=range]{width:100%;accent-color:#78adff}.badge{display:inline-block;padding:2px 6px;border-radius:6px;background:#1e2b40;color:#a9caff;margin-left:4px}@media(max-height:700px){#view{inset:0 0 176px 0}.dock{padding:8px 10px}.row{margin:5px 0}.title h1{font-size:18px}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="view"></div>
+  <div class="top">
+    <div class="title"><h1>Light Art WebGL V6.1</h1><small id="status">GPU • film mince • Fresnel spectral</small></div>
+    <div class="actions"><button id="debug">Debug OFF</button><button id="topview">Vue dessus</button></div>
+  </div>
+  <div class="dock">
+    <button id="auto">Rotation auto OFF • 5 s</button>
+    <div class="row"><span>Angle</span><input id="angle" type="range" min="-180" max="180" step="1" value="-180"><output id="angleO"></output></div>
+    <div class="row"><span>Rayon</span><input id="radius" type="range" min="8" max="40" step="1" value="27"><output id="radiusO"></output></div>
+    <div class="row"><span>Z</span><input id="height" type="range" min="5" max="40" step="1" value="12"><output id="heightO"></output></div>
+    <div class="row"><span>Faisceau</span><input id="beam" type="range" min="7" max="50" step="1" value="17"><output id="beamO"></output></div>
+  </div>
+</div>
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js';
+
+const el=id=>document.getElementById(id), host=el('view');
+const state={angle:-180,radius:27,height:12,beam:17,auto:false,debug:false,top:false,yaw:-.78,pitch:.72,drag:false,px:0,py:0};
+const pieces=[{x:6.5,y:13.5,s:4,a:25},{x:12,y:10.5,s:3,a:105},{x:10.5,y:5.5,s:2.5,a:-20}];
+const center=new THREE.Vector3(10,10,0), ZUP=new THREE.Vector3(0,0,1);
+const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false,powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(devicePixelRatio||1,1.5)); renderer.outputColorSpace=THREE.SRGBColorSpace; renderer.toneMapping=THREE.ACESFilmicToneMapping; renderer.toneMappingExposure=1.08; renderer.shadowMap.enabled=false; renderer.setClearColor(0x080c13,1); host.appendChild(renderer.domElement);
+const scene=new THREE.Scene(); scene.fog=new THREE.FogExp2(0x080c13,.011); const camera=new THREE.PerspectiveCamera(42,1,.1,180);
+scene.add(new THREE.HemisphereLight(0xe7efff,0x10131a,.48)); const key=new THREE.DirectionalLight(0xffffff,.38); key.position.set(-8,-4,18); scene.add(key);
+const floor=new THREE.Mesh(new THREE.PlaneGeometry(70,70),new THREE.MeshStandardMaterial({color:0x20242b,roughness:.96,metalness:0})); floor.position.set(10,10,-.05); scene.add(floor);
+const board=new THREE.Mesh(new THREE.PlaneGeometry(20,20),new THREE.MeshStandardMaterial({color:0xdadad2,roughness:.97,metalness:0})); board.position.set(10,10,0); scene.add(board);
+const grid=new THREE.GridHelper(40,20,0x314159,0x202a36); grid.rotation.x=Math.PI/2; grid.position.set(10,10,.015); grid.visible=false; scene.add(grid);
+
+function vecFromPiece(p){const a=THREE.MathUtils.degToRad(p.a);return{u:new THREE.Vector3(Math.cos(a),Math.sin(a),0),n:new THREE.Vector3(-Math.sin(a),Math.cos(a),0)}}
+function plateCorners(p){const {u}=vecFromPiece(p),b=new THREE.Vector3(p.x,p.y,0),h=u.clone().multiplyScalar(p.s/2),z=new THREE.Vector3(0,0,p.s);return[b.clone().sub(h),b.clone().add(h),b.clone().add(h).add(z),b.clone().sub(h).add(z)]}
+function planeGeometryFromCorners(c){const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(c.flatMap(v=>[v.x,v.y,v.z])),3));g.setAttribute('uv',new THREE.BufferAttribute(new Float32Array([0,0,1,0,1,1,0,1]),2));g.setIndex([0,1,2,0,2,3]);g.computeVertexNormals();return g}
+function makePlate(p){const mat=new THREE.MeshPhysicalMaterial({color:0xeaf5ff,transparent:true,opacity:.26,roughness:.1,metalness:0,side:THREE.DoubleSide,transmission:.18,thickness:.16,ior:1.49,iridescence:1,iridescenceIOR:1.36,iridescenceThicknessRange:[150,360],depthWrite:false});const m=new THREE.Mesh(planeGeometryFromCorners(plateCorners(p)),mat);m.renderOrder=7;scene.add(m);return m}
+const plates=pieces.map(makePlate);
+
+function projectionMaterial(additive=false){const m=new THREE.ShaderMaterial({transparent:true,depthWrite:false,side:THREE.DoubleSide,vertexColors:true,uniforms:{soft:{value:.035}},vertexShader:`attribute float aAlpha; varying vec2 vUv; varying vec3 vCol; varying float vA; void main(){vUv=uv;vCol=color;vA=aAlpha;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,fragmentShader:`varying vec2 vUv; varying vec3 vCol; varying float vA; uniform float soft; void main(){float ex=smoothstep(0.0,soft,vUv.x)*smoothstep(1.0,1.0-soft,vUv.x);float ey=smoothstep(0.0,soft,vUv.y)*smoothstep(1.0,1.0-soft,vUv.y);float edge=pow(max(0.0,ex*ey),0.55);gl_FragColor=vec4(vCol*vA,vA*edge);}`});m.blending=THREE.CustomBlending;m.blendEquation=THREE.AddEquation;m.blendSrc=THREE.OneMinusDstColorFactor;m.blendDst=THREE.OneFactor;if(additive){m.blending=THREE.AdditiveBlending;m.uniforms.soft.value=.08}return m}
+function makeProjection(additive=false){const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(12),3));g.setAttribute('uv',new THREE.BufferAttribute(new Float32Array([0,0,1,0,1,1,0,1]),2));g.setAttribute('color',new THREE.BufferAttribute(new Float32Array(12),3));g.setAttribute('aAlpha',new THREE.BufferAttribute(new Float32Array(4),1));g.setIndex([0,1,2,0,2,3]);const m=new THREE.Mesh(g,projectionMaterial(additive));m.frustumCulled=false;m.renderOrder=additive?3:4;scene.add(m);return m}
+const proj=pieces.map(()=>({R:makeProjection(false),T:makeProjection(false),Rg:makeProjection(true),Tg:makeProjection(true)}));
+
+const lampGroup=new THREE.Group();scene.add(lampGroup);lampGroup.add(new THREE.Mesh(new THREE.SphereGeometry(.42,16,10),new THREE.MeshBasicMaterial({color:0xfff3c7})));lampGroup.add(new THREE.Mesh(new THREE.SphereGeometry(.72,14,8),new THREE.MeshBasicMaterial({color:0xffd77e,transparent:true,opacity:.12,blending:THREE.AdditiveBlending,depthWrite:false})));
+const spot=new THREE.SpotLight(0xffefc5,4.2,80,THREE.MathUtils.degToRad(state.beam/2),.65,1.7);scene.add(spot);scene.add(spot.target);spot.target.position.copy(center);
+let cone=new THREE.Mesh();scene.add(cone);
+function getSource(){const a=THREE.MathUtils.degToRad(state.angle);return new THREE.Vector3(10+state.radius*Math.cos(a),10+state.radius*Math.sin(a),state.height)}
+function rebuildCone(){if(cone.geometry)cone.geometry.dispose();if(cone.material)cone.material.dispose();const s=getSource(),dist=s.distanceTo(center),rad=Math.tan(THREE.MathUtils.degToRad(state.beam/2))*dist;cone.geometry=new THREE.ConeGeometry(rad,dist,28,1,true);cone.material=new THREE.MeshBasicMaterial({color:0xffe8ac,transparent:true,opacity:.022,side:THREE.DoubleSide,blending:THREE.AdditiveBlending,depthWrite:false});cone.renderOrder=1}
+
+const debugGeo=new THREE.BufferGeometry();debugGeo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(18),3));const debugLines=new THREE.LineSegments(debugGeo,new THREE.LineBasicMaterial({color:0xb9d9ff,transparent:true,opacity:.48}));debugLines.visible=false;scene.add(debugLines);
+function reflectDir(d,n){return d.clone().sub(n.clone().multiplyScalar(2*d.dot(n))).normalize()}
+function groundHit(o,d){if(d.z>=-1e-6)return null;const t=-o.z/d.z;if(t<0)return null;return o.clone().addScaledVector(d,t)}
+function omega(full){const a=THREE.MathUtils.degToRad(full/2);return 2*Math.PI*(1-Math.cos(a))}
+function powerGain(){return THREE.MathUtils.clamp(omega(28)/omega(state.beam),.35,3.8)}
+function beamAt(q,src){const axis=center.clone().sub(src).normalize(),d=q.clone().sub(src).normalize(),half=THREE.MathUtils.degToRad(state.beam/2),mu=axis.dot(d),co=Math.cos(half);if(mu<=co)return 0;const profile=Math.pow((mu-co)/(1-co),1.35),d0=Math.hypot(27,12),dg=(d0/Math.max(1,q.distanceTo(src)))**2;return profile*powerGain()*dg}
+
+function fresnelFilm(ci,lambdaNm){const n0=1.0003,n1=1.75,n2=1.49,d=185;ci=THREE.MathUtils.clamp(ci,.001,.999999);const s0=Math.sqrt(Math.max(0,1-ci*ci)),s1=THREE.MathUtils.clamp(n0/n1*s0,0,.999999),c1=Math.sqrt(1-s1*s1),s2=THREE.MathUtils.clamp(n0/n2*s0,0,.999999),c2=Math.sqrt(1-s2*s2);const rs01=(n0*ci-n1*c1)/(n0*ci+n1*c1),rs12=(n1*c1-n2*c2)/(n1*c1+n2*c2);const rp01=(n1*ci-n0*c1)/(n1*ci+n0*c1),rp12=(n2*c1-n1*c2)/(n2*c1+n1*c2);const phase=4*Math.PI*n1*d*c1/lambdaNm,cp=Math.cos(phase);const calc=(a,b)=>{const num=a*a+b*b+2*a*b*cp,den=1+(a*b)*(a*b)+2*a*b*cp;return THREE.MathUtils.clamp(num/Math.max(1e-7,den),0,.98)};return .5*(calc(rs01,rs12)+calc(rp01,rp12))}
+const wavelengths=[630,540,460];
+function spectral(ci,mode){const R=wavelengths.map(w=>fresnelFilm(ci,w));return mode==='R'?R:R.map(v=>.96*(1-v))}
+function colorAndStrength(spec,I){const mx=Math.max(...spec,1e-5),mean=(spec[0]+spec[1]+spec[2])/3;let q=spec.map(v=>v/mx),qm=(q[0]+q[1]+q[2])/3;q=q.map(v=>THREE.MathUtils.clamp((v-qm)*1.35+qm,0,1)).map(v=>Math.pow(v,1/2.05));const col=new THREE.Color(q[0],q[1],q[2]);const e=THREE.MathUtils.clamp(I*(.28+.72*mean),0,4);return{col,e}}
+function footprintData(p,mode,src){const {n}=vecFromPiece(p),corners=plateCorners(p),pts=[],cols=[],alphas=[];for(const q of corners){const d=q.clone().sub(src).normalize(),ci=Math.abs(d.dot(n)),od=mode==='R'?reflectDir(d,n):d,hit=groundHit(q,od);pts.push(hit);const I=beamAt(q,src)*ci,{col,e}=colorAndStrength(spectral(ci,mode),I);cols.push(col);const base=mode==='R'?.58:.42;alphas.push(THREE.MathUtils.clamp(base*(1-Math.exp(-1.25*e)),0,.62))}return{pts,cols,alphas}}
+function setProjection(mesh,data,glow=false){if(data.pts.some(x=>!x)){mesh.visible=false;return}mesh.visible=data.alphas.some(a=>a>.006);if(!mesh.visible)return;const P=mesh.geometry.attributes.position.array,C=mesh.geometry.attributes.color.array,A=mesh.geometry.attributes.aAlpha.array;for(let i=0;i<4;i++){const p=data.pts[i],c=data.cols[i],a=data.alphas[i]*(glow?.18:1);P[i*3]=p.x;P[i*3+1]=p.y;P[i*3+2]=glow?.011:.018;C[i*3]=c.r;C[i*3+1]=c.g;C[i*3+2]=c.b;A[i]=a}mesh.geometry.attributes.position.needsUpdate=true;mesh.geometry.attributes.color.needsUpdate=true;mesh.geometry.attributes.aAlpha.needsUpdate=true}
+function updateOptics(){const src=getSource();for(let i=0;i<pieces.length;i++){const R=footprintData(pieces[i],'R',src),T=footprintData(pieces[i],'T',src);setProjection(proj[i].R,R,false);setProjection(proj[i].T,T,false);setProjection(proj[i].Rg,R,true);setProjection(proj[i].Tg,T,true);const mid=new THREE.Vector3(pieces[i].x,pieces[i].y,pieces[i].s*.5),ci=Math.abs(mid.clone().sub(src).normalize().dot(vecFromPiece(pieces[i]).n));plates[i].material.opacity=THREE.MathUtils.clamp(.18+.12*(1-ci),.18,.32)}}
+function updateLamp(){const src=getSource();lampGroup.position.copy(src);spot.position.copy(src);spot.angle=THREE.MathUtils.degToRad(state.beam/2);spot.intensity=1.7+powerGain()*.8;const dir=src.clone().sub(center);cone.position.copy(src).add(center).multiplyScalar(.5);cone.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),dir.normalize());const a=debugGeo.attributes.position.array;let k=0,put=v=>{a[k++]=v.x;a[k++]=v.y;a[k++]=v.z};put(src);put(center);for(const p of pieces){const {n}=vecFromPiece(p),b=new THREE.Vector3(p.x,p.y,p.s*.5);put(b);put(b.clone().addScaledVector(n,3))}debugGeo.attributes.position.needsUpdate=true}
+function updateCamera(){if(state.top){camera.position.set(10,10,47);camera.up.set(0,1,0);camera.lookAt(center);return}const d=47,cp=Math.cos(state.pitch);camera.position.set(10+d*cp*Math.cos(state.yaw),10+d*cp*Math.sin(state.yaw),2+d*Math.sin(state.pitch));camera.up.copy(ZUP);camera.lookAt(10,10,1.6)}
+function sync(full=false){updateLamp();updateOptics();if(full)rebuildCone();updateCamera();el('status').innerHTML=`GPU • film mince <span class="badge">12 quads</span> • puissance ×${powerGain().toFixed(1)}`}
+function resize(){const w=host.clientWidth,h=host.clientHeight;renderer.setSize(w,h,false);camera.aspect=w/Math.max(1,h);camera.updateProjectionMatrix()}
+new ResizeObserver(resize).observe(host);resize();rebuildCone();sync();
+let autoStart=0,autoBase=state.angle;
+function frame(ms){if(state.auto){if(!autoStart)autoStart=ms;state.angle=((autoBase+(ms-autoStart)/5000*360+180)%360+360)%360-180;el('angle').value=state.angle;el('angleO').value=Math.round(state.angle)+'°';updateLamp();updateOptics()}updateCamera();renderer.render(scene,camera);requestAnimationFrame(frame)}requestAnimationFrame(frame);
+function bind(id,key,unit,recone=false){const i=el(id),o=el(id+'O'),go=()=>{state[key]=+i.value;o.value=(key==='angle'?Math.round(state[key]):state[key])+unit;if(recone)rebuildCone();sync(false)};i.addEventListener('input',go);go()}
+bind('angle','angle','°');bind('radius','radius',' cm',true);bind('height','height',' cm',true);bind('beam','beam','°',true);
+el('auto').onclick=()=>{state.auto=!state.auto;el('auto').classList.toggle('on',state.auto);el('auto').textContent=state.auto?'Rotation auto ON • 5 s':'Rotation auto OFF • 5 s';autoBase=state.angle;autoStart=0};
+el('debug').onclick=()=>{state.debug=!state.debug;debugLines.visible=state.debug;grid.visible=state.debug;el('debug').classList.toggle('on',state.debug);el('debug').textContent=state.debug?'Debug ON':'Debug OFF'};
+el('topview').onclick=()=>{state.top=!state.top;el('topview').classList.toggle('on',state.top);el('topview').textContent=state.top?'Vue 3D':'Vue dessus';updateCamera()};
+const dom=renderer.domElement;dom.addEventListener('pointerdown',e=>{if(state.top)return;state.drag=true;state.px=e.clientX;state.py=e.clientY;dom.setPointerCapture(e.pointerId)});dom.addEventListener('pointermove',e=>{if(!state.drag||state.top)return;state.yaw-=(e.clientX-state.px)*.008;state.pitch=THREE.MathUtils.clamp(state.pitch+(e.clientY-state.py)*.008,.18,1.38);state.px=e.clientX;state.py=e.clientY});dom.addEventListener('pointerup',()=>state.drag=false);dom.addEventListener('pointercancel',()=>state.drag=false);addEventListener('pageshow',()=>setTimeout(resize,80));
+</script>
+</body>
+</html>
