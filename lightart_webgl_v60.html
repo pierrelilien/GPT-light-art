@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Light Art WebGL V6.0</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;background:#090c12;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;overflow:hidden}#app{position:fixed;inset:0}#view{position:absolute;inset:0 0 188px 0;touch-action:none}canvas{display:block;width:100%;height:100%}.top{position:absolute;left:12px;right:12px;top:max(10px,env(safe-area-inset-top));z-index:10;display:flex;align-items:flex-start;justify-content:space-between;gap:10px;pointer-events:none}.title{pointer-events:auto;background:#0b1018c9;border:1px solid #283244;border-radius:14px;padding:10px 12px;backdrop-filter:blur(10px)}.title h1{font-size:21px;margin:0 0 4px}.title small{color:#cbd5e1;line-height:1.25}.actions{display:flex;gap:6px;pointer-events:auto}button{border:1px solid #46536b;background:#202a39;color:white;border-radius:11px;padding:10px 13px;font-weight:750;font-size:13px}.on{background:#38527a}.dock{position:absolute;z-index:20;left:8px;right:8px;bottom:max(8px,env(safe-area-inset-bottom));max-width:850px;margin:auto;background:#121923f2;border:1px solid #36445b;border-radius:18px;padding:10px 12px;backdrop-filter:blur(14px);box-shadow:0 16px 60px #0008}.dock>button{width:100%;margin-bottom:7px}.row{display:grid;grid-template-columns:72px 1fr 66px;gap:8px;align-items:center;margin:7px 0}.row output{text-align:right;font-weight:700;font-size:13px;color:#f5f7fb}input[type=range]{width:100%;accent-color:#78adff}.badge{display:inline-block;padding:2px 6px;border-radius:6px;background:#1e2b40;color:#a9caff;margin-left:4px}@media(max-height:700px){#view{inset:0 0 176px 0}.dock{padding:8px 10px}.row{margin:5px 0}.title h1{font-size:18px}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="view"></div>
+  <div class="top">
+    <div class="title"><h1>Light Art WebGL V6.0</h1><small id="status">Three.js • GPU • projections continues</small></div>
+    <div class="actions"><button id="debug">Debug OFF</button><button id="topview">Vue dessus</button></div>
+  </div>
+  <div class="dock">
+    <button id="auto">Rotation auto OFF • 5 s</button>
+    <div class="row"><span>Angle</span><input id="angle" type="range" min="-180" max="180" step="1" value="-180"><output id="angleO"></output></div>
+    <div class="row"><span>Rayon</span><input id="radius" type="range" min="8" max="40" step="1" value="27"><output id="radiusO"></output></div>
+    <div class="row"><span>Z</span><input id="height" type="range" min="5" max="40" step="1" value="12"><output id="heightO"></output></div>
+    <div class="row"><span>Faisceau</span><input id="beam" type="range" min="7" max="50" step="1" value="17"><output id="beamO"></output></div>
+  </div>
+</div>
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js';
+
+const el = id => document.getElementById(id);
+const host = el('view');
+const state = {angle:-180,radius:27,height:12,beam:17,auto:false,debug:false,top:false,yaw:-0.78,pitch:0.72,drag:false,px:0,py:0};
+const pieces = [
+  {x:6.5,y:13.5,s:4,a:25,h:318},
+  {x:12.0,y:10.5,s:3,a:105,h:182},
+  {x:10.5,y:5.5,s:2.5,a:-20,h:48}
+];
+const center = new THREE.Vector3(10,10,0);
+const renderer = new THREE.WebGLRenderer({antialias:true,alpha:false,powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.5));
+renderer.setSize(host.clientWidth,host.clientHeight,false);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = false;
+renderer.setClearColor(0x080c13,1);
+host.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x080c13,0.012);
+const camera = new THREE.PerspectiveCamera(42,1,0.1,160);
+
+scene.add(new THREE.HemisphereLight(0xe8f2ff,0x11141b,1.15));
+const key = new THREE.DirectionalLight(0xffffff,1.25); key.position.set(-8,-4,18); scene.add(key);
+
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(70,70),
+  new THREE.MeshStandardMaterial({color:0x242830,roughness:0.92,metalness:0})
+);
+floor.position.set(10,10,-0.045); floor.rotation.x=0; scene.add(floor);
+
+const board = new THREE.Mesh(
+  new THREE.PlaneGeometry(20,20),
+  new THREE.MeshStandardMaterial({color:0xf2f1e8,roughness:0.93,metalness:0})
+);
+board.position.set(10,10,0); scene.add(board);
+
+const grid = new THREE.GridHelper(40,20,0x314159,0x202a36);
+grid.rotation.x=Math.PI/2; grid.position.set(10,10,0.012); grid.visible=false; scene.add(grid);
+
+function hsl(h,s=0.98,l=0.58){const c=new THREE.Color(); c.setHSL((((h%360)+360)%360)/360,s,l); return c;}
+function vecFromPiece(p){const a=THREE.MathUtils.degToRad(p.a);return {u:new THREE.Vector3(Math.cos(a),Math.sin(a),0), n:new THREE.Vector3(-Math.sin(a),Math.cos(a),0)};}
+function plateCorners(p){const {u}=vecFromPiece(p), b=new THREE.Vector3(p.x,p.y,0), half=u.clone().multiplyScalar(p.s/2);return [b.clone().sub(half),b.clone().add(half),b.clone().add(half).add(new THREE.Vector3(0,0,p.s)),b.clone().sub(half).add(new THREE.Vector3(0,0,p.s))];}
+function makePlate(p){
+  const geo=new THREE.PlaneGeometry(p.s,p.s,1,1);
+  const mat=new THREE.MeshPhysicalMaterial({color:0xf7fbff,transparent:true,opacity:0.36,roughness:0.08,metalness:0.03,side:THREE.DoubleSide,transmission:0.2,thickness:0.18,ior:1.49,iridescence:1,iridescenceIOR:1.32,iridescenceThicknessRange:[120,420],depthWrite:false});
+  const mesh=new THREE.Mesh(geo,mat);
+  mesh.position.set(p.x,p.y,p.s/2);
+  mesh.rotation.x=Math.PI/2;
+  mesh.rotation.y=THREE.MathUtils.degToRad(-p.a);
+  scene.add(mesh); return mesh;
+}
+const plates=pieces.map(makePlate);
+
+function ribbonMaterial(){
+  return new THREE.ShaderMaterial({
+    transparent:true,depthWrite:false,side:THREE.DoubleSide,
+    blending:THREE.NormalBlending,
+    uniforms:{c0:{value:new THREE.Color(1,0,1)},c1:{value:new THREE.Color(0,1,1)},c2:{value:new THREE.Color(1,1,0)},alpha:{value:0.5},boost:{value:1.0}},
+    vertexShader:`varying vec2 vUv; void main(){vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
+    fragmentShader:`varying vec2 vUv; uniform vec3 c0; uniform vec3 c1; uniform vec3 c2; uniform float alpha; uniform float boost;
+      void main(){
+        float x=clamp(vUv.x,0.0,1.0);
+        vec3 a=mix(c0,c1,smoothstep(0.0,0.52,x));
+        vec3 col=mix(a,c2,smoothstep(0.48,1.0,x));
+        float edge=smoothstep(0.0,0.12,vUv.y)*smoothstep(1.0,0.88,vUv.y);
+        float side=smoothstep(0.0,0.07,x)*smoothstep(1.0,0.93,x);
+        float glow=(0.58+0.42*sin(vUv.y*3.1415926))*edge*side;
+        gl_FragColor=vec4(col*boost,alpha*glow);
+      }`
+  });
+}
+function makeRibbon(){
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(12),3));
+  geo.setAttribute('uv',new THREE.BufferAttribute(new Float32Array([0,0,1,0,1,1,0,1]),2));
+  geo.setIndex([0,1,2,0,2,3]);
+  const mat=ribbonMaterial();
+  const mesh=new THREE.Mesh(geo,mat); mesh.frustumCulled=false; mesh.renderOrder=5; scene.add(mesh);
+  return mesh;
+}
+const ribbons=pieces.map(()=>({R:makeRibbon(),T:makeRibbon()}));
+
+const glows=pieces.map(()=>({R:makeRibbon(),T:makeRibbon()}));
+for(const g of glows.flatMap(x=>[x.R,x.T])){g.material.blending=THREE.AdditiveBlending;g.material.uniforms.alpha.value=0.12;g.position.z=-0.002;g.renderOrder=4;}
+
+const lampGroup=new THREE.Group(); scene.add(lampGroup);
+const lampCore=new THREE.Mesh(new THREE.SphereGeometry(0.48,20,12),new THREE.MeshBasicMaterial({color:0xfff2be})); lampGroup.add(lampCore);
+const lampHalo=new THREE.Mesh(new THREE.SphereGeometry(0.82,16,10),new THREE.MeshBasicMaterial({color:0xffd76e,transparent:true,opacity:0.17,blending:THREE.AdditiveBlending,depthWrite:false})); lampGroup.add(lampHalo);
+const spot=new THREE.SpotLight(0xffefc0,18,80,THREE.MathUtils.degToRad(state.beam/2),0.55,1.35); scene.add(spot); scene.add(spot.target); spot.target.position.copy(center);
+
+let cone=new THREE.Mesh(); scene.add(cone);
+function rebuildCone(){
+  if(cone.geometry)cone.geometry.dispose(); if(cone.material)cone.material.dispose();
+  const src=getSource(), dist=src.distanceTo(center), rad=Math.tan(THREE.MathUtils.degToRad(state.beam/2))*dist;
+  cone.geometry=new THREE.ConeGeometry(rad,dist,36,1,true);
+  cone.material=new THREE.MeshBasicMaterial({color:0xffe8a0,transparent:true,opacity:0.035,side:THREE.DoubleSide,blending:THREE.AdditiveBlending,depthWrite:false});
+  cone.renderOrder=1;
+}
+
+const debugMat=new THREE.LineBasicMaterial({color:0xb9d9ff,transparent:true,opacity:.5});
+const debugGeo=new THREE.BufferGeometry(); debugGeo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(18),3));
+const debugLines=new THREE.LineSegments(debugGeo,debugMat); debugLines.visible=false; scene.add(debugLines);
+
+function getSource(){const a=THREE.MathUtils.degToRad(state.angle);return new THREE.Vector3(10+state.radius*Math.cos(a),10+state.radius*Math.sin(a),state.height);}
+function reflectDir(d,n){return d.clone().sub(n.clone().multiplyScalar(2*d.dot(n))).normalize();}
+function groundHit(o,d){if(d.z>=-1e-5)return null;const t=-o.z/d.z;if(t<0)return null;return o.clone().addScaledVector(d,t);}
+function setQuad(mesh,pts){
+  if(pts.some(p=>!p)){mesh.visible=false;return} mesh.visible=true;
+  const a=mesh.geometry.attributes.position.array;
+  for(let i=0;i<4;i++){a[i*3]=pts[i].x;a[i*3+1]=pts[i].y;a[i*3+2]=0.018;}
+  mesh.geometry.attributes.position.needsUpdate=true; mesh.geometry.computeBoundingSphere();
+}
+function footprint(p,mode,src){
+  const {n}=vecFromPiece(p), corners=plateCorners(p), out=[];
+  for(const q of corners){const d=q.clone().sub(src).normalize();const od=mode==='R'?reflectDir(d,n):d;out.push(groundHit(q,od));}
+  return out;
+}
+function incidence(p,src){const {n}=vecFromPiece(p);const mid=new THREE.Vector3(p.x,p.y,p.s*.5);const d=mid.clone().sub(src).normalize();return Math.abs(d.dot(n));}
+function beamWeight(p,src){
+  const axis=center.clone().sub(src).normalize(), mid=new THREE.Vector3(p.x,p.y,p.s*.5), d=mid.clone().sub(src).normalize();
+  const ang=Math.acos(THREE.MathUtils.clamp(axis.dot(d),-1,1)), half=THREE.MathUtils.degToRad(state.beam/2);
+  if(ang>=half)return 0;const x=1-ang/half;return Math.pow(x,1.15);
+}
+function powerGain(){const o=a=>2*Math.PI*(1-Math.cos(THREE.MathUtils.degToRad(a/2)));return THREE.MathUtils.clamp(o(28)/o(state.beam),0.35,3.8);}
+function updateRibbonColor(mesh,p,mode,ci,intensity,glow=false){
+  const shift=(1-ci)*245+(mode==='T'?155:0);const span=34+26*(1-ci);const base=p.h+shift;
+  mesh.material.uniforms.c0.value.copy(hsl(base-span,0.98,0.53));
+  mesh.material.uniforms.c1.value.copy(hsl(base,0.99,0.59));
+  mesh.material.uniforms.c2.value.copy(hsl(base+span,0.98,0.54));
+  mesh.material.uniforms.alpha.value=glow?THREE.MathUtils.clamp(intensity*.13,0,.18):THREE.MathUtils.clamp(.12+intensity*.48,0,.72);
+  mesh.material.uniforms.boost.value=glow?1.15:THREE.MathUtils.clamp(.85+intensity*.5,.85,1.45);
+}
+function updateOptics(){
+  const src=getSource(), pg=powerGain();
+  for(let i=0;i<pieces.length;i++){
+    const p=pieces[i], ci=incidence(p,src), bw=beamWeight(p,src), I=bw*ci*pg;
+    const r=footprint(p,'R',src), t=footprint(p,'T',src);
+    setQuad(ribbons[i].R,r); setQuad(ribbons[i].T,t); setQuad(glows[i].R,r); setQuad(glows[i].T,t);
+    updateRibbonColor(ribbons[i].R,p,'R',ci,I,false); updateRibbonColor(ribbons[i].T,p,'T',ci,I*.86,false);
+    updateRibbonColor(glows[i].R,p,'R',ci,I,true); updateRibbonColor(glows[i].T,p,'T',ci,I*.86,true);
+    ribbons[i].R.visible &= I>.01; ribbons[i].T.visible &= I>.01; glows[i].R.visible=ribbons[i].R.visible; glows[i].T.visible=ribbons[i].T.visible;
+    plates[i].material.opacity=THREE.MathUtils.clamp(.22+I*.15,.22,.48);
+  }
+}
+function updateLamp(){
+  const src=getSource(); lampGroup.position.copy(src); spot.position.copy(src); spot.angle=THREE.MathUtils.degToRad(state.beam/2); spot.intensity=7+powerGain()*4.5;
+  const dir=src.clone().sub(center); cone.position.copy(src).add(center).multiplyScalar(.5);
+  cone.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),dir.normalize());
+  const a=debugGeo.attributes.position.array; let k=0;
+  const put=(v)=>{a[k++]=v.x;a[k++]=v.y;a[k++]=v.z}; put(src);put(center);
+  for(const p of pieces){const {n}=vecFromPiece(p),b=new THREE.Vector3(p.x,p.y,p.s*.5);put(b);put(b.clone().addScaledVector(n,3));}
+  debugGeo.attributes.position.needsUpdate=true;
+}
+function updateCamera(){
+  if(state.top){camera.position.set(10,10,47);camera.up.set(0,1,0);camera.lookAt(center);return;}
+  const d=47, cp=Math.cos(state.pitch);camera.position.set(10+d*cp*Math.cos(state.yaw),10+d*cp*Math.sin(state.yaw),2+d*Math.sin(state.pitch));camera.up.set(0,0,1);camera.lookAt(10,10,1.6);
+}
+function sync(full=false){updateLamp();updateOptics();if(full)rebuildCone();updateCamera();el('status').innerHTML=`Three.js • GPU <span class="badge">${renderer.info.render.triangles||0} tris</span> • puissance ×${powerGain().toFixed(1)}`;}
+
+function resize(){const w=host.clientWidth,h=host.clientHeight;renderer.setSize(w,h,false);camera.aspect=w/Math.max(1,h);camera.updateProjectionMatrix();}
+new ResizeObserver(resize).observe(host); resize(); rebuildCone(); sync();
+
+let autoStart=0,autoBase=state.angle;
+function frame(ms){
+  if(state.auto){if(!autoStart)autoStart=ms;state.angle=((autoBase+(ms-autoStart)/5000*360+180)%360+360)%360-180;el('angle').value=state.angle;el('angleO').value=Math.round(state.angle)+'°';updateLamp();updateOptics();}
+  updateCamera(); renderer.render(scene,camera); requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+function bind(id,key,unit,recone=false){const i=el(id),o=el(id+'O');const go=()=>{state[key]=+i.value;o.value=(key==='angle'?Math.round(state[key]):state[key])+unit;if(recone)rebuildCone();sync(false)};i.addEventListener('input',go);go();}
+bind('angle','angle','°');bind('radius','radius',' cm',true);bind('height','height',' cm',true);bind('beam','beam','°',true);
+el('auto').onclick=()=>{state.auto=!state.auto;el('auto').classList.toggle('on',state.auto);el('auto').textContent=state.auto?'Rotation auto ON • 5 s':'Rotation auto OFF • 5 s';autoBase=state.angle;autoStart=0;};
+el('debug').onclick=()=>{state.debug=!state.debug;debugLines.visible=state.debug;grid.visible=state.debug;el('debug').classList.toggle('on',state.debug);el('debug').textContent=state.debug?'Debug ON':'Debug OFF';};
+el('topview').onclick=()=>{state.top=!state.top;el('topview').classList.toggle('on',state.top);el('topview').textContent=state.top?'Vue 3D':'Vue dessus';updateCamera();};
+
+const dom=renderer.domElement;
+dom.addEventListener('pointerdown',e=>{if(state.top)return;state.drag=true;state.px=e.clientX;state.py=e.clientY;dom.setPointerCapture(e.pointerId)});
+dom.addEventListener('pointermove',e=>{if(!state.drag||state.top)return;state.yaw-=(e.clientX-state.px)*.008;state.pitch=THREE.MathUtils.clamp(state.pitch+(e.clientY-state.py)*.008,.18,1.38);state.px=e.clientX;state.py=e.clientY;});
+dom.addEventListener('pointerup',()=>state.drag=false);dom.addEventListener('pointercancel',()=>state.drag=false);
+addEventListener('pageshow',()=>setTimeout(resize,80));
+</script>
+</body>
+</html>
